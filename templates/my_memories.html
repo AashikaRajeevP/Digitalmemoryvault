@@ -1,0 +1,20 @@
+{% extends 'base.html' %}
+{% block title %} My Memories {% endblock %}
+
+{% block content %}
+
+<h1>My Memories</h1>
+
+{% for memory in memories %}
+
+    <h3>{{memory.title}}</h3>
+    <p>Open Date: {{memory.open_date}}</p>
+    {% if today >= memory.open_date %}
+        <p>{{memory.message}}</p>
+    {% else %}
+        <p>This memory is locked.</p>
+    {% endif %}
+    <hr>
+{% endfor %}
+{% endblock %}
+

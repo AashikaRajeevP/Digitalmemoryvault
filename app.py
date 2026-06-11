@@ -5,6 +5,7 @@ from flask_migrate import Migrate
 db = SQLAlchemy()
 
 app = Flask(__name__,template_folder='templates')
+app.secret_key = "memoryvault-secret-key"
 app.config['SQLALCHEMY_DATABASE_URI']='sqlite:///memoryvault.db'
 
 db.init_app(app)
