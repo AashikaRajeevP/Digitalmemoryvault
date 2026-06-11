@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block title %} MEMORY {% endblock %}
+
+{% block content %}
+<h1> ECHOES OF LIFE </h1>
+Preserving memories, securing moments forever!!
+
+<form method="POST" action="{{url_for('create_memory')}}">
+    <input type="text" name="title" placeholder="Memory title"><br><br>
+    <textarea type="text" name="message" placeholder="Write your memory here"></textarea><br><br>
+    <label>Open Date:</label>
+    <input type="date" name="open_date"><br><br>
+    <input type="submit" value="Create Memory">
+</form>
+
+
+{% endblock %}

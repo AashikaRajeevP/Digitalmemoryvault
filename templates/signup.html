@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block title %} SIGNUP {% endblock %}
+
+{% block content %}
+<h1> SIGNUP PAGE </h1>
+Welcome to your digital memory vault!!
+
+<form method="POST" action="{{url_for('signup')}}"><br>
+    <input type="text" name="username" placeholder="Username"><br>
+    <input type="password" name="password" placeholder="Password"><br>
+    <input type="submit" value="Signup">
+</form>
+<a href="{{url_for('index')}}">Home</a>
+<a href="{{url_for('login')}}">Login</a>
+{% endblock %}
