@@ -4,9 +4,19 @@
 {% block content %}
 <h1> DIGITAL MEMORY VAULT </h1>
 
-<a href="{{url_for('signup')}}">Signup</a>
-<a href="{{url_for('login')}}">Login</a>
-<a href="{{url_for('create_memory')}}">Create Memory</a>
-<a href="{{url_for('my_memories')}}">My Memories</a>
+{% if 'user_id' in session %}
+    <h3>Welcome Back!</h3>
+    <p>Total Memories: {{ total }}</p>
+    <p>Locked Memories: {{ locked }}</p>
+    <p>Unlocked Memories: {{ unlocked }}</p>
 
+    <hr>
+    <a href="{{url_for('create_memory')}}">Create Memory</a>
+    <a href="{{url_for('my_memories')}}">My Memories</a>
+    <a href="{{url_for('logout')}}">Logout</a>
+{% else %}
+
+    <a href="{{url_for('signup')}}">Signup</a>
+    <a href="{{url_for('login')}}">Login</a>
+{% endif %}
 {% endblock %}

@@ -13,6 +13,7 @@
         <p>{{memory.message}}</p>
     {% else %}
         <p>This memory is locked.</p>
+        <p>Opens in {{ (memory.open_date - today).days }} days</p>
     {% endif %}
     <hr>
 {% endfor %}

@@ -6,7 +6,24 @@ from app import User,Memory
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+
+    total = 0
+    locked = 0
+    unlocked = 0
+
+    if 'user_id' in session:
+        memories=Memory.query.filter_by(user_id=session['user_id']).all()
+
+        total = len(memories)
+
+        for memory in memories:
+
+            if memory.open_date > date.today():
+                locked += 1
+            else:
+                unlocked += 1
+
+    return render_template('index.html',total=total,locked=locked,unlocked=unlocked)
 
 @app.route('/signup',methods=['GET','POST'])
 def signup():
@@ -47,8 +64,9 @@ def login():
 @app.route('/logout')
 def logout():
     session.clear()
+    return redirect (url_for('login'))
 
-    return redirect(url_for('login'))
+
 
 @app.route('/create_memory',methods=['GET','POST'])
 def create_memory():
