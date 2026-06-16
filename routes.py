@@ -96,6 +96,11 @@ def my_memories():
 
     return render_template("my_memories.html",memories=memories,today=date.today())
 
+@app.route('/memory_detail/<int:mid>')
+def memory_detail(mid):
+    memory = Memory.query.get(mid)
+    return render_template('memory_detail.html',memory=memory,today=date.today())
+
 @app.route('/test')
 def test():
     return f"Session: {dict(session)}"

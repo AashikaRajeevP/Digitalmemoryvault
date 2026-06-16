@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+{% block title %} Memory Details {% endblock %}
+
+{% block content %}
+<h1>Every memory matters—keep it forever!!</h1>
+
+<h2>{{memory.title}}</h2>
+<p>Created On - {{memory.created_on}}</p>
+<p>Open Date - {{memory.open_date}}</p>
+<hr>
+{% if today >= memory.open_date %}
+    <p>{{memory.message}}</p>
+{% else %}
+    <p>This memory is still locked.</p>
+{% endif %}
+{% endblock %}

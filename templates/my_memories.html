@@ -8,9 +8,10 @@
 {% for memory in memories %}
 
     <h3>{{memory.title}}</h3>
+    <a href="{{ url_for('memory_detail',mid=memory.mid) }}">View Details</a>
     <p>Open Date: {{memory.open_date}}</p>
     {% if today >= memory.open_date %}
-        <p>{{memory.message}}</p>
+        <p>IT IS UNLOCKED!!Click the link above to see it</p>
     {% else %}
         <p>This memory is locked.</p>
         <p>Opens in {{ (memory.open_date - today).days }} days</p>
