@@ -1,11 +1,14 @@
+import os
+from dotenv import load_dotenv
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 
+load_dotenv()
 db = SQLAlchemy()
 
 app = Flask(__name__,template_folder='templates')
-app.secret_key = "memoryvault-secret-key"
+app.secret_key = os.getenv("SECRET_KEY")
 app.config['SQLALCHEMY_DATABASE_URI']='sqlite:///memoryvault.db'
 
 db.init_app(app)
