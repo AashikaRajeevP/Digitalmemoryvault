@@ -7,9 +7,29 @@ from flask_migrate import Migrate
 load_dotenv()
 db = SQLAlchemy()
 
-app = Flask(__name__,template_folder='templates')
+IS_VERCEL = os.getenv("VERCEL") == "1"
+
+app = Flask(
+    __name__,
+    template_folder='templates',
+    instance_path="/tmp/instance" if IS_VERCEL else None,
+)
+
+if IS_VERCEL and not os.getenv("DATABASE_URL"):
+    raise RuntimeError(
+        "DATABASE_URL is not set. Add the Neon PostgreSQL connection string "
+        "to the Vercel project environment variables."
+    )
+
 app.secret_key = os.getenv("SECRET_KEY")
-app.config['SQLALCHEMY_DATABASE_URI']='sqlite:///memoryvault.db'
+
+if not app.secret_key:
+    raise RuntimeError(
+        "SECRET_KEY is not set. Add it to .env locally or to Vercel environment variables."
+    )
+
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv("DATABASE_URL", "sqlite:///memoryvault.db")
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {"pool_pre_ping": True, "pool_recycle": 300}
 
 db.init_app(app)
 
