@@ -30,8 +30,8 @@ if not app.secret_key:
 
 database_url = os.getenv("DATABASE_URL", "sqlite:///memoryvault.db")
 
-if database_url.startswith(("postgresql+psycopg://", "postgres://")):
-    database_url = "postgresql://" + database_url.split("://", 1)[1]
+if database_url.startswith(("postgresql://", "postgresql+psycopg://", "postgres://")):
+    database_url = "postgresql+psycopg2://" + database_url.split("://", 1)[1]
 
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {"pool_pre_ping": True, "pool_recycle": 300}
