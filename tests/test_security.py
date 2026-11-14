@@ -1,3 +1,4 @@
+import re
 from datetime import date
 
 from werkzeug.security import check_password_hash
@@ -28,6 +29,15 @@ def create_memory(app_module, user_id, title="A memory", open_date=None):
         app_module.db.session.add(memory)
         app_module.db.session.commit()
         return memory.mid
+
+
+def csrf_token_from(response):
+    match = re.search(
+        r'name="csrf_token" value="([^"]+)"',
+        response.get_data(as_text=True),
+    )
+    assert match is not None
+    return match.group(1)
 
 
 def test_signup_hashes_password(client, app_module):
@@ -209,12 +219,83 @@ def test_security_headers_are_present(client):
     assert "default-src 'self'" in response.headers["Content-Security-Policy"]
 
 
-def test_auth_pages_are_noindex(client):
+def test_auth_pages_are_noindex_and_same_origin(client):
     response = client.get("/login")
 
     assert response.status_code == 200
     assert response.headers["X-Robots-Tag"] == "noindex, nofollow"
-    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert response.headers["Referrer-Policy"] == "same-origin"
+
+
+def test_https_login_csrf_requires_same_origin_referer(client, app):
+    app.config["WTF_CSRF_ENABLED"] = True
+    assert app.config["WTF_CSRF_SSL_STRICT"] is True
+
+    base_url = "https://vault.example.com"
+    response = client.get("/login", base_url=base_url)
+    assert response.status_code == 200
+    assert response.headers["Referrer-Policy"] == "same-origin"
+    token = csrf_token_from(response)
+
+    missing_referer = client.post(
+        "/login",
+        base_url=base_url,
+        data={
+            "csrf_token": token,
+            "username": "nobody",
+            "password": "password1234",
+        },
+    )
+    assert missing_referer.status_code == 400
+
+    same_origin_referer = client.post(
+        "/login",
+        base_url=base_url,
+        headers={"Referer": f"{base_url}/login"},
+        data={
+            "csrf_token": token,
+            "username": "nobody",
+            "password": "password1234",
+        },
+    )
+    assert same_origin_referer.status_code == 401
+    assert b"Invalid username or password" in same_origin_referer.data
+
+
+def test_https_signup_csrf_requires_same_origin_referer(client, app, app_module):
+    app.config["WTF_CSRF_ENABLED"] = True
+
+    base_url = "https://vault.example.com"
+    response = client.get("/signup", base_url=base_url)
+    assert response.status_code == 200
+    assert response.headers["Referrer-Policy"] == "same-origin"
+    token = csrf_token_from(response)
+
+    missing_referer = client.post(
+        "/signup",
+        base_url=base_url,
+        data={
+            "csrf_token": token,
+            "username": "https-user",
+            "password": "password1234",
+        },
+    )
+    assert missing_referer.status_code == 400
+
+    same_origin_referer = client.post(
+        "/signup",
+        base_url=base_url,
+        headers={"Referer": f"{base_url}/signup"},
+        data={
+            "csrf_token": token,
+            "username": "https-user",
+            "password": "password1234",
+        },
+    )
+    assert same_origin_referer.status_code == 302
+
+    with app_module.app.app_context():
+        assert app_module.User.query.filter_by(username="https-user").one()
 
 
 def test_logout_requires_post(client, app_module):
