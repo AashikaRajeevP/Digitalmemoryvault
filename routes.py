@@ -1,106 +1,184 @@
-from flask import render_template,request,session,redirect,url_for
 from datetime import date
-from app import app,db
-from app import User,Memory
+from functools import wraps
+
+from flask import flash, redirect, render_template, request, session, url_for
+from sqlalchemy.exc import IntegrityError
+
+from app import Memory, User, app, db, limiter
+from services.security import (
+    DUMMY_PASSWORD_HASH,
+    hash_password,
+    is_password_hash,
+    verify_password,
+)
+
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        user_id = session.get("user_id")
+        if user_id is None or db.session.get(User, user_id) is None:
+            session.clear()
+            flash("Please log in to continue.", "error")
+            return redirect(url_for("login"))
+        return view(*args, **kwargs)
+
+    return wrapped
+
 
 @app.route('/')
 def index():
-
     total = 0
     locked = 0
     unlocked = 0
 
     if 'user_id' in session:
-        memories=Memory.query.filter_by(user_id=session['user_id']).all()
+        memories = Memory.query.filter_by(user_id=session['user_id']).all()
 
         total = len(memories)
 
         for memory in memories:
-
             if memory.open_date > date.today():
                 locked += 1
             else:
                 unlocked += 1
 
-    return render_template('index.html',total=total,locked=locked,unlocked=unlocked)
+    return render_template('index.html', total=total, locked=locked, unlocked=unlocked)
 
-@app.route('/signup',methods=['GET','POST'])
+
+@app.route('/signup', methods=['GET', 'POST'])
+@limiter.limit("5 per hour")
 def signup():
     if request.method == 'GET':
         return render_template('signup.html')
-    elif request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
 
-        user = User(username=username, password=password)
+    username = request.form.get('username', '').strip()
+    password = request.form.get('password', '')
+    min_length = app.config['PASSWORD_MIN_LENGTH']
+    max_length = app.config['PASSWORD_MAX_LENGTH']
 
+    if not 3 <= len(username) <= 80:
+        flash("Username must be between 3 and 80 characters.", "error")
+        return render_template('signup.html'), 400
+
+    if len(password) < min_length:
+        flash(f"Password must be at least {min_length} characters.", "error")
+        return render_template('signup.html'), 400
+
+    if len(password) > max_length:
+        flash(f"Password must be at most {max_length} characters.", "error")
+        return render_template('signup.html'), 400
+
+    if User.query.filter_by(username=username).first() is not None:
+        flash("That username is already in use.", "error")
+        return render_template('signup.html'), 400
+
+    user = User(username=username, password=hash_password(password))
+
+    try:
         db.session.add(user)
         db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flash("That username is already in use.", "error")
+        return render_template('signup.html'), 400
+
+    flash("Account created. Please log in.", "success")
+    return redirect(url_for('login'))
 
 
-        return f"Welcome {username}!!"
-
-@app.route('/login',methods=['POST','GET'])
+@app.route('/login', methods=['POST', 'GET'])
+@limiter.limit("10 per minute")
 def login():
     if request.method == 'GET':
         return render_template('login.html')
-    elif request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
 
-        user = User.query.filter_by(username=username).first()
+    username = request.form.get('username', '').strip()
+    password = request.form.get('password', '')
+    user = User.query.filter_by(username=username).first()
 
-        if user is None :
-            return "User not found"
+    if user is None:
+        verify_password(DUMMY_PASSWORD_HASH, password)
+        flash("Invalid username or password.", "error")
+        return render_template('login.html'), 401
 
-        if user.password != password:
-            return "Wrong password"
+    if not verify_password(user.password, password):
+        flash("Invalid username or password.", "error")
+        return render_template('login.html'), 401
 
-        session['user_id'] = user.uid
+    if not is_password_hash(user.password):
+        user.password = hash_password(password)
+        db.session.commit()
 
+    session.clear()
+    session['user_id'] = user.uid
+    session.permanent = True
+    flash("Welcome back.", "success")
     return redirect(url_for('index'))
 
-@app.route('/logout')
+
+@app.route('/logout', methods=['POST'])
+@login_required
 def logout():
     session.clear()
-    return redirect (url_for('login'))
+    flash("You have been logged out.", "success")
+    return redirect(url_for('login'))
 
 
-
-@app.route('/create_memory',methods=['GET','POST'])
+@app.route('/create_memory', methods=['GET', 'POST'])
+@login_required
+@limiter.limit("60 per hour")
 def create_memory():
-    if 'user_id' not in session:
-        return redirect(url_for('login'))
     if request.method == 'GET':
-        return render_template ('create_memory.html')
-    if request.method == 'POST':
-        title = request.form['title']
-        message = request.form['message']
-        open_date = request.form['open_date']
+        return render_template('create_memory.html')
 
-    memory = Memory(title=title,message=message,open_date=date.fromisoformat(open_date),created_on=date.today(),user_id=session['user_id'])
+    title = request.form.get('title', '').strip()
+    message = request.form.get('message', '').strip()
+    open_date_raw = request.form.get('open_date', '').strip()
+
+    if not title or len(title) > 200:
+        flash("Title is required and must be at most 200 characters.", "error")
+        return render_template('create_memory.html'), 400
+
+    if not message or len(message) > 20000:
+        flash("Memory text is required and must be at most 20000 characters.", "error")
+        return render_template('create_memory.html'), 400
+
+    try:
+        open_date = date.fromisoformat(open_date_raw)
+    except ValueError:
+        flash("Please choose a valid open date.", "error")
+        return render_template('create_memory.html'), 400
+
+    memory = Memory(
+        title=title,
+        message=message,
+        open_date=open_date,
+        created_on=date.today(),
+        user_id=session['user_id'],
+    )
 
     db.session.add(memory)
     db.session.commit()
 
-    return f"Memory {title} created!"
+    flash("Memory created.", "success")
+    return redirect(url_for('my_memories'))
+
 
 @app.route('/my_memories')
+@login_required
 def my_memories():
-
-    if 'user_id' not in session:
-        return redirect(url_for('login'))
-
     memories = Memory.query.filter_by(user_id=session['user_id']).all()
 
-    return render_template("my_memories.html",memories=memories,today=date.today())
+    return render_template("my_memories.html", memories=memories, today=date.today())
+
 
 @app.route('/memory_detail/<int:mid>')
+@login_required
 def memory_detail(mid):
-    memory = Memory.query.get(mid)
-    return render_template('memory_detail.html',memory=memory,today=date.today())
+    memory = Memory.query.filter_by(
+        mid=mid,
+        user_id=session['user_id'],
+    ).first_or_404()
 
-@app.route('/test')
-def test():
-    return f"Session: {dict(session)}"
-
+    return render_template('memory_detail.html', memory=memory, today=date.today())

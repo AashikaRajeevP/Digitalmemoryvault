@@ -13,7 +13,10 @@
     <hr>
     <a href="{{url_for('create_memory')}}">Create Memory</a>
     <a href="{{url_for('my_memories')}}">My Memories</a>
-    <a href="{{url_for('logout')}}">Logout</a>
+    <form method="POST" action="{{url_for('logout')}}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit">Logout</button>
+    </form>
 {% else %}
 
     <a href="{{url_for('signup')}}">Signup</a>
