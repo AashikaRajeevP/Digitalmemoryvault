@@ -2,11 +2,11 @@
 
 Last updated: 2026-11-15
 
-Repository: `AashikaRajeevP/memoryvault`  
-Branch: `master`  
-HEAD: `39628ab Fix strict CSRF validation on HTTPS`  
-Remote status: `origin/master` is in sync with local HEAD (0 ahead, 0 behind)  
-Working tree at inspection: clean. This `PROJECT_STATUS.md` file is newly created and is currently untracked until committed. Stage 2 migration wiring (changes to `app.py`, new `migrations/`, and `docs/STAGE2_DATABASE_PLAN.md`) is also uncommitted until committed.
+- Repository: `AashikaRajeevP/memoryvault`
+- Branch: `master`
+- HEAD: `22dbcd5 Set up Flask-Migrate and database baseline`
+- Remote status: local `HEAD` is 1 commit ahead of `origin/master` (not pushed)
+- Working tree at inspection: Stage 3 email/account changes are uncommitted (modified `app.py`, `routes.py`, `templates/index.html`, `templates/signup.html`, `tests/test_security.py`; new `services/accounts.py`, `templates/account.html`, `tests/test_accounts.py`, and migration `6694a1a15bcb`).
 
 ## Status Legend
 
@@ -31,7 +31,7 @@ The long-term goal is to extend the vault with photo attachments, voice memories
 - Flask-SQLAlchemy 3.1.1 / SQLAlchemy
 - PostgreSQL via Neon in production
 - SQLite locally when `DATABASE_URL` is blank
-- Flask-Migrate 4.1.0 is wired in `app.py`; `migrations/` holds baseline revision `897fe5622bb6`
+- Flask-Migrate 4.1.0 is wired in `app.py`; `migrations/` holds baseline `897fe5622bb6` and email revision `6694a1a15bcb`
 - Flask-WTF 1.3.0 for CSRF
 - Flask-Limiter 4.1.1 with Redis support
 - redis-py 8.1.0
@@ -43,10 +43,11 @@ The long-term goal is to extend the vault with photo attachments, voice memories
 
 ### Current architecture
 
-- `app.py` creates the Flask app, loads configuration, initializes extensions, defines the `User` and `Memory` models inline, calls `db.create_all()`, and imports `routes.py`.
+- `app.py` creates the Flask app, loads configuration, initializes extensions (including Flask-Migrate), defines the `User` and `Memory` models inline, and imports `routes.py`. Schema is created by migrations, not at import.
 - `routes.py` contains all routes, auth helpers, validation, rate limits, and ownership checks.
 - `services/security.py` contains password hash detection, hashing, and verification helpers.
-- `templates/` contains Jinja templates: home, login, signup, create memory, my memories, memory detail, error, and base layout.
+- `services/accounts.py` contains email normalization and validation helpers.
+- `templates/` contains Jinja templates: home, login, signup, account settings, create memory, my memories, memory detail, error, and base layout.
 - `tests/` contains pytest configuration and security/behavior tests using a temporary SQLite database.
 - `scripts/hash_existing_passwords.py` is a guarded dry-run/apply utility for converting legacy plaintext passwords to hashes.
 - `migrate_to_postgres.py` is a SQLite-to-PostgreSQL copy utility. It is not part of the normal app runtime.
@@ -65,8 +66,10 @@ The long-term goal is to extend the vault with photo attachments, voice memories
 
 Implemented and locally tested:
 
-- User signup with unique usernames and password hashing.
+- User signup with unique usernames, email collection, and password hashing.
 - User login with hashed passwords.
+- Optional email on user accounts with format validation, normalization, and uniqueness.
+- Account settings page (`/account`) for logged-in users to add or update their own email.
 - Legacy plaintext password compatibility: a successful login automatically upgrades the stored plaintext password to a Werkzeug hash.
 - User logout using a POST-only route.
 - Create a memory with title, message, and open date.
@@ -84,11 +87,11 @@ Implemented and locally tested:
 
 Not yet implemented:
 
-- Account email and account settings.
+- Email verification behavior.
 - Password reset.
 - Photo or audio attachments.
 - Frontend redesign and GSAP animations.
-- Database migrations for future schema changes.
+- Applying schema migrations to production Neon.
 
 ## 4. Stage 1 Security Changes
 
@@ -164,12 +167,50 @@ Stage 1 is **implemented, tested locally, committed, and pushed**. Production ve
 - The development-only `/test` route was removed.
 - CSRF error, 404, 413, and 500 handlers were added.
 
-## 5. Current Deployment Status
+## 5. Stage 3 Email and Account Settings
+
+Stage 3 is **implemented and tested locally**. It is **not committed**, and the database **has not been migrated in production**.
+
+### Email field
+
+- `User.email` is a nullable `String` column added by migration `6694a1a15bcb` (`add users email`).
+- Uniqueness is enforced with a unique index `ix_users_email` (not a column-level constraint) so the migration works on both SQLite and PostgreSQL.
+- Email is normalized (trimmed and lowercased) before storage and comparison.
+- Format is validated in `services/accounts.py` (`normalize_email`, `is_valid_email`, max length 254). No new dependency was added.
+
+### Signup
+
+- The signup form collects an email address.
+- Email is required for new signups; invalid or duplicate emails return HTTP 400.
+- Duplicate detection is case-insensitive because emails are normalized first.
+
+### Account settings
+
+- New route `GET /account` and `POST /account`, protected by `login_required`.
+- Shows the current username and email, and lets the user add or update their email.
+- The route only ever reads and writes the row for `session['user_id']`; there is no user id parameter, so a user cannot target another account.
+- Duplicate emails are rejected, excluding the user's own current email.
+- `IntegrityError` on commit is caught and reported as "email already in use".
+
+### CSRF and security
+
+- The account form includes a hidden `csrf_token`; the global `CSRFProtect` enforces it.
+- `account` was added to `AUTH_ENDPOINTS`, so the page is `noindex, nofollow` and sends `Referrer-Policy: same-origin`.
+- Existing authentication, password hashing, session lifetime, and memory behavior are unchanged.
+- Existing accounts with `email = NULL` continue to log in and use the app.
+
+### Migration
+
+- Revision: `6694a1a15bcb`, down revision `897fe5622bb6`.
+- Validated on a disposable SQLite database: `upgrade` adds the column and unique index, `downgrade` removes them, and `flask db check` reports no drift.
+- Not applied to Neon.
+
+## 6. Current Deployment Status
 
 ### Vercel
 
 - The project is deployed/reported as deployed on Vercel.
-- The current HEAD `39628ab` is pushed to `origin/master`.
+- The current HEAD `22dbcd5` is committed locally and not yet pushed to `origin/master`.
 - Vercel deployment of that exact commit is **not verified from this session**.
 - Production signup/login verification is still pending after the CSRF fix.
 
@@ -197,7 +238,7 @@ Stage 1 is **implemented, tested locally, committed, and pushed**. Production ve
 - `MAX_CONTENT_LENGTH` is currently 2 MB. It must be raised or made route-specific before implementing 10 MB photo uploads or 25 MB audio uploads.
 - CSP currently allows same-origin scripts plus Cloudinary image/media/API domains. A third-party Cloudinary browser widget would require a CSP review.
 
-## 6. Current Testing Status and Latest Results
+## 7. Current Testing Status and Latest Results
 
 Command:
 
@@ -208,12 +249,21 @@ python -m pytest -q
 Latest result:
 
 ```text
-19 passed in 7.47s
+34 passed in 10.82s
 ```
 
 Test coverage includes:
 
 - Signup hashes passwords.
+- Signup stores a normalized email.
+- Signup requires a valid email and rejects invalid formats.
+- Duplicate emails are rejected (case-insensitively).
+- Existing accounts with a NULL email can still log in.
+- Account settings requires login.
+- Account settings shows and updates the current user's email.
+- Account updates reject invalid and duplicate emails.
+- A user cannot modify another user's account.
+- Account updates require a CSRF token.
 - Duplicate usernames are rejected.
 - Minimum password length is 12.
 - Public pages render.
@@ -240,7 +290,7 @@ Important testing caveats:
 - No test currently accesses production Neon or Upstash.
 - No test verifies the live Vercel deployment.
 
-## 7. Database Status and Important Precautions
+## 8. Database Status and Important Precautions
 
 ### Neon status at last inspection
 
@@ -251,7 +301,7 @@ Last verified: 2026-11-14 during read-only backup/inspection. This was not reche
 - Users: 7 rows
 - Memories: 6 rows
 - `users` columns: `uid`, `username`, `password`
-- No `email` column
+- No `email` column in production; the code now defines `email` via migration `6694a1a15bcb`, which is not yet applied to Neon
 - All 7 passwords were plaintext at inspection time
 - No `alembic_version` table
 - No password-reset-token table
@@ -279,15 +329,17 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 - Do not delete existing users.
 - Do not run tests against Neon.
 - Re-inspect production schema and counts before planning the next database change.
-- The app currently uses `db.create_all()`; future schema changes need a deliberate migration plan.
+- The app now uses Alembic migrations (`migrations/`); the import-time `db.create_all()` was removed.
+- Migration `6694a1a15bcb` (email) must not be applied to Neon until the baseline is stamped and a fresh backup is verified.
+- Production database status: not migrated. Neon still has no `alembic_version` table, no `email` column, and no `ix_users_email` index.
 
-## 8. Features Still to Implement
+## 9. Features Still to Implement
 
 ### Email and account settings
 
-- Add an email column and account settings page.
-- Allow legacy users to add or update their email.
-- Decide and implement email verification behavior.
+- Implemented: optional email column, signup email collection, and the `/account` settings page (Stage 3, migration `6694a1a15bcb`).
+- Remaining: decide and implement email verification behavior.
+- Remaining: apply the email migration to production (see section 8 and `docs/STAGE2_DATABASE_PLAN.md`).
 
 ### Photo uploads through Cloudinary
 
@@ -325,12 +377,13 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 ### Database and migration work
 
 - Flask-Migrate is now wired and `migrations/` is scaffolded with baseline revision `897fe5622bb6`.
+- Email migration `6694a1a15bcb` (adds `users.email` + unique index `ix_users_email`) is implemented and validated locally but not applied.
 - `db.create_all()` at import was removed; schema is owned by migrations. Local setup now requires `flask --app app db upgrade`.
 - Next: stamp the existing Neon database as baseline `897fe5622bb6` (no DDL), then apply Stage 2 migrations one at a time per `docs/STAGE2_DATABASE_PLAN.md`.
 - Back up Neon before any migration.
 - Test migrations on a disposable database and show SQL before applying to Neon.
 
-## 9. Important Decisions and Constraints
+## 10. Important Decisions and Constraints
 
 - Preserve Flask, Jinja, SQLAlchemy, and the existing architecture.
 - Do not migrate the application to React.
@@ -348,7 +401,7 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 - Never execute migrations or password conversion against Neon without explicit approval.
 - Implement features incrementally and run the full test suite after each change.
 
-## 10. Exact Next Steps
+## 11. Exact Next Steps
 
 1. Confirm Vercel has deployed commit `39628ab`; check the deployment status and runtime logs.
 2. Verify production signup after the 5-per-hour rate-limit window resets. Do not weaken the limit.
@@ -362,6 +415,9 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 10. Before any Neon schema change, create and verify a fresh backup, prepare the migration, test it on a disposable database, and wait for explicit approval before applying it.
 11. To adopt migrations on Neon, first stamp the existing database as baseline `897fe5622bb6` without running its DDL, then apply one Stage 2 migration at a time.
 12. Resolve the deployment gap: decide how `flask db upgrade` runs for Vercel (manual release step or build hook) before the first production migration.
+13. Stage 3 email/account code is implemented and tested locally but uncommitted. Review, then commit and push when approved.
+14. To migrate email to production: verify a fresh Neon backup, stamp baseline `897fe5622bb6`, then `flask db upgrade` to apply `6694a1a15bcb`; confirm the `email` column and `ix_users_email` index exist and that existing users still log in.
+15. After the email migration, existing users can add an email through `/account`; no bulk backfill is required.
 
 ## Useful Local Commands
 

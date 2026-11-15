@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block title %} Account Settings {% endblock %}
+
+{% block content %}
+<h1>ACCOUNT SETTINGS</h1>
+<p>Username: {{ user.username }}</p>
+<p>Email: {{ user.email or 'Not set' }}</p>
+
+<form method="POST" action="{{ url_for('account') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Email:</label>
+    <input type="email" name="email" value="{{ user.email or '' }}" placeholder="you@example.com" autocomplete="email"><br><br>
+    <input type="submit" value="Save Email">
+</form>
+
+<a href="{{ url_for('index') }}">Home</a>
+{% endblock %}

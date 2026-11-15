@@ -8,6 +8,7 @@ Welcome to your digital memory vault!!
 <form method="POST" action="{{url_for('signup')}}"><br>
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="text" name="username" placeholder="Username" autocomplete="username"><br>
+    <input type="email" name="email" placeholder="Email" autocomplete="email"><br>
     <input type="password" name="password" placeholder="Password" autocomplete="new-password"><br>
     <input type="submit" value="Signup">
 </form>

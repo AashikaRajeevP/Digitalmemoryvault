@@ -5,6 +5,7 @@ from flask import flash, redirect, render_template, request, session, url_for
 from sqlalchemy.exc import IntegrityError
 
 from app import Memory, User, app, db, limiter
+from services.accounts import is_valid_email, normalize_email
 from services.security import (
     DUMMY_PASSWORD_HASH,
     hash_password,
@@ -54,6 +55,7 @@ def signup():
 
     username = request.form.get('username', '').strip()
     password = request.form.get('password', '')
+    email = normalize_email(request.form.get('email', ''))
     min_length = app.config['PASSWORD_MIN_LENGTH']
     max_length = app.config['PASSWORD_MAX_LENGTH']
 
@@ -69,11 +71,19 @@ def signup():
         flash(f"Password must be at most {max_length} characters.", "error")
         return render_template('signup.html'), 400
 
+    if not email or not is_valid_email(email):
+        flash("Please enter a valid email address.", "error")
+        return render_template('signup.html'), 400
+
     if User.query.filter_by(username=username).first() is not None:
         flash("That username is already in use.", "error")
         return render_template('signup.html'), 400
 
-    user = User(username=username, password=hash_password(password))
+    if User.query.filter_by(email=email).first() is not None:
+        flash("That email address is already in use.", "error")
+        return render_template('signup.html'), 400
+
+    user = User(username=username, password=hash_password(password), email=email)
 
     try:
         db.session.add(user)
@@ -123,6 +133,42 @@ def logout():
     session.clear()
     flash("You have been logged out.", "success")
     return redirect(url_for('login'))
+
+
+@app.route('/account', methods=['GET', 'POST'])
+@login_required
+def account():
+    user = db.session.get(User, session['user_id'])
+
+    if request.method == 'GET':
+        return render_template('account.html', user=user)
+
+    email = normalize_email(request.form.get('email', ''))
+
+    if not email or not is_valid_email(email):
+        flash("Please enter a valid email address.", "error")
+        return render_template('account.html', user=user), 400
+
+    existing = User.query.filter(
+        User.email == email,
+        User.uid != user.uid,
+    ).first()
+
+    if existing is not None:
+        flash("That email address is already in use.", "error")
+        return render_template('account.html', user=user), 400
+
+    user.email = email
+
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flash("That email address is already in use.", "error")
+        return render_template('account.html', user=user), 400
+
+    flash("Email updated.", "success")
+    return redirect(url_for('account'))
 
 
 @app.route('/create_memory', methods=['GET', 'POST'])

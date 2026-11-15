@@ -43,7 +43,11 @@ def csrf_token_from(response):
 def test_signup_hashes_password(client, app_module):
     response = client.post(
         "/signup",
-        data={"username": "alice", "password": "password1234"},
+        data={
+            "username": "alice",
+            "password": "password1234",
+            "email": "alice@example.com",
+        },
     )
 
     assert response.status_code == 302
@@ -59,11 +63,19 @@ def test_signup_hashes_password(client, app_module):
 def test_signup_rejects_duplicate_username(client, app_module):
     first = client.post(
         "/signup",
-        data={"username": "alice", "password": "password1234"},
+        data={
+            "username": "alice",
+            "password": "password1234",
+            "email": "alice@example.com",
+        },
     )
     second = client.post(
         "/signup",
-        data={"username": "alice", "password": "password1234"},
+        data={
+            "username": "alice",
+            "password": "password1234",
+            "email": "alice2@example.com",
+        },
     )
 
     assert first.status_code == 302
@@ -80,7 +92,11 @@ def test_password_minimum_length_default_is_12(app):
 def test_signup_enforces_minimum_password_length(client):
     response = client.post(
         "/signup",
-        data={"username": "alice", "password": "x" * 11},
+        data={
+            "username": "alice",
+            "password": "x" * 11,
+            "email": "alice@example.com",
+        },
     )
 
     assert response.status_code == 400
@@ -278,6 +294,7 @@ def test_https_signup_csrf_requires_same_origin_referer(client, app, app_module)
             "csrf_token": token,
             "username": "https-user",
             "password": "password1234",
+            "email": "https-user@example.com",
         },
     )
     assert missing_referer.status_code == 400
@@ -290,6 +307,7 @@ def test_https_signup_csrf_requires_same_origin_referer(client, app, app_module)
             "csrf_token": token,
             "username": "https-user",
             "password": "password1234",
+            "email": "https-user@example.com",
         },
     )
     assert same_origin_referer.status_code == 302
@@ -319,7 +337,11 @@ def test_csrf_is_required_for_signup(client, app):
 
     response = client.post(
         "/signup",
-        data={"username": "alice", "password": "password1234"},
+        data={
+            "username": "alice",
+            "password": "password1234",
+            "email": "alice@example.com",
+        },
     )
 
     assert response.status_code == 400

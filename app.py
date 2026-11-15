@@ -82,7 +82,7 @@ if IS_VERCEL and RATELIMIT_STORAGE_URI == "memory://":
         "across Vercel serverless instances."
     )
 
-AUTH_ENDPOINTS = {"login", "signup", "forgot_password", "reset_password"}
+AUTH_ENDPOINTS = {"login", "signup", "forgot_password", "reset_password", "account"}
 
 
 @app.after_request
@@ -182,10 +182,12 @@ migrate = Migrate(app, db)
 
 class User(db.Model):
     __tablename__ = 'users'
+    __table_args__ = (db.Index('ix_users_email', 'email', unique=True),)
 
     uid = db.Column(db.Integer,primary_key=True)
     username = db.Column(db.String,nullable=False,unique=True)
     password = db.Column(db.String,nullable=False)
+    email = db.Column(db.String,nullable=True)
 
     def __repr__(self):
         return f'<User: {self.username}>'
