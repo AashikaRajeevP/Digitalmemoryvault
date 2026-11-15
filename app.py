@@ -177,6 +177,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {"pool_pre_ping": True, "pool_recycle": 300}
 
 db.init_app(app)
+migrate = Migrate(app, db)
 
 
 class User(db.Model):
@@ -202,9 +203,6 @@ class Memory(db.Model):
     def __repr__(self):
         return f'<Memory: {self.title}>'
 
-
-with app.app_context():
-    db.create_all()
 
 from routes import *
 
