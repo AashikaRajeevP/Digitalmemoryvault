@@ -441,10 +441,10 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 
 ## 11. Exact Next Steps
 
-1. Review the Stage 3 FIX working-tree changes, then commit and push when approved (not done in this session).
-2. Set Vercel environment variables: `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `RESEND_ENABLED=true`, and a dedicated `OTP_SECRET` (see section 12).
+1. Stage 3 FIX is committed and pushed (`3f719d7`, `master` == `origin/master`). No working-tree changes remain.
+2. Vercel environment variables are configured: `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `RESEND_ENABLED=true`, and `OTP_SECRET` (see section 12). Confirm `RESEND_ENABLED` is exactly `true`/`1`/`yes`.
 3. Verify a Resend sending domain for production; `onboarding@resend.dev` is testing-only (see section 12).
-4. Create a fresh Neon backup and verify it by restoring into a separate disposable PostgreSQL database, not just `pg_restore --list` (see section 12).
+4. A Neon backup exists at `C:\Users\hp\Desktop\memoryvault_backup.dump`; verify it by restoring into a separate disposable PostgreSQL database, not just `pg_restore --list` (see section 12).
 5. Review the production reset/deployment plan in section 12 and grant explicit approval before running anything against Neon.
 6. After the reset migration, verify production signup (two-step OTP) and login over HTTPS.
 7. Verify the 6-digit code email arrives from the verified sender domain.
@@ -454,15 +454,19 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 
 ## 12. Production Reset and Deployment Plan (awaiting separate approval)
 
-The existing Neon data is disposable (approved). The plan is to back it up, verify the backup by restoring it into a separate disposable PostgreSQL database, then drop ONLY the four application objects and rebuild the schema from scratch with the full migration chain, then deploy the Stage 3 FIX code.
+The existing Neon data is disposable (approved). The plan is to verify the existing backup by restoring it into a separate disposable PostgreSQL database, then drop ONLY the four application objects and rebuild the schema from scratch with the full migration chain. The Stage 3 FIX code is already pushed (`3f719d7`), so the reset + migration are the only remaining production actions.
+
+> Prerequisite: `psql`, `pg_dump`, `pg_restore`, and `createdb` must be installed and on `PATH`. They are not present on the current Windows machine, so run these steps from an environment that has the PostgreSQL client tools.
 
 > DESTRUCTIVE: Step 3 permanently deletes all `users`, `memories`, `email_verifications`, and migration history. It must run ONLY after Step 2 has produced a backup that has been successfully restored and verified. Do NOT run any step against Neon without explicit approval.
 
 ### Step 1 - Back up Neon (read-only)
 
 ```powershell
-pg_dump "$env:PRODUCTION_DATABASE_URL" --format=custom --file "C:\Users\hp\AppData\Local\Temp\opencode\dmv-backups\neon_pre_stage3.dump"
+pg_dump "$env:PRODUCTION_DATABASE_URL" --format=custom --file "$env:USERPROFILE\Desktop\memoryvault_backup.dump"
 ```
+
+The current backup lives at `C:\Users\hp\Desktop\memoryvault_backup.dump` (a valid `PGDMP` custom archive). Keep the filename used here consistent with the restore step below.
 
 ### Step 2 - Verify the backup by restoring it into a SEPARATE disposable PostgreSQL
 
@@ -470,13 +474,15 @@ pg_dump "$env:PRODUCTION_DATABASE_URL" --format=custom --file "C:\Users\hp\AppDa
 
 ```powershell
 # Point these at a disposable local/scratch Postgres, NEVER Neon.
-$local = "-h 127.0.0.1 -p 5432 -U postgres"
-createdb $local dmv_restore_check
-pg_restore $local --no-owner --dbname=dmv_restore_check "C:\Users\hp\AppData\Local\Temp\opencode\dmv-backups\neon_pre_stage3.dump"
+# Use an argument ARRAY: PowerShell would pass a single quoted "-h ... -U ..."
+# string as one token, which breaks createdb/pg_restore/psql.
+$localArgs = @("-h", "127.0.0.1", "-p", "5432", "-U", "postgres")
+createdb @localArgs dmv_restore_check
+pg_restore @localArgs --no-owner --dbname=dmv_restore_check "$env:USERPROFILE\Desktop\memoryvault_backup.dump"
 
 # Compare against the pre-reset production inspection.
-psql $local -d dmv_restore_check -c "select (select count(*) from users) as users, (select count(*) from memories) as memories;"
-psql $local -d dmv_restore_check -c "select username, email from users order by uid;"
+psql @localArgs -d dmv_restore_check -c "select (select count(*) from users) as users, (select count(*) from memories) as memories;"
+psql @localArgs -d dmv_restore_check -c "select username, email from users order by uid;"
 ```
 
 The restore must complete without errors and the row counts must match production. Keep the dump until the reset and upgrade are confirmed healthy. This exact dump -> restore -> verify procedure was validated locally against a disposable PostgreSQL 16.4 instance.
@@ -503,15 +509,11 @@ flask --app app db check
 
 Expected chain: `897fe5622bb6` (initial) -> `6694a1a15bcb` (add users email) -> `fc35b4ffa9c0` (email verification, head).
 
-### Step 5 - Deploy the application code
+### Step 5 - Deploy the application code (already done)
 
-```powershell
-git add -A
-git commit -m "Add signup email verification and email login"
-git push origin master
-```
+The Stage 3 FIX code is already committed and pushed: `3f719d7 Implement email OTP signup verification` (`master` == `origin/master`). No further code step is required.
 
-Vercel has no build hook for migrations, so `flask db upgrade` (step 4) must run as a manual release step BEFORE the new code is served. Because the app now selects `users.email`, deploying code before the migration reproduces the current 500 errors.
+Vercel has no build hook for migrations, so `flask db upgrade` (step 4) must run as a manual release step. Because the code is already pushed and may already be deployed, production signup/login return 500 (`users.email` missing) until steps 3-4 are applied; the migration is the only remaining production action.
 
 ### Step 6 - Verify
 
