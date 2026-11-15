@@ -55,6 +55,13 @@ app.config.update(
     PASSWORD_MIN_LENGTH=_env_int("PASSWORD_MIN_LENGTH", 12, 12),
     PASSWORD_MAX_LENGTH=256,
     RATELIMIT_HEADERS_ENABLED=True,
+    OTP_SECRET=os.getenv("OTP_SECRET", "").strip() or app.secret_key,
+    OTP_TTL_SECONDS=_env_int("OTP_TTL_SECONDS", 300, 60),
+    OTP_MAX_ATTEMPTS=_env_int("OTP_MAX_ATTEMPTS", 5, 1),
+    OTP_RESEND_COOLDOWN_SECONDS=_env_int("OTP_RESEND_COOLDOWN_SECONDS", 60, 0),
+    RESEND_API_KEY=os.getenv("RESEND_API_KEY", "").strip(),
+    RESEND_FROM_EMAIL=os.getenv("RESEND_FROM_EMAIL", "").strip() or "onboarding@resend.dev",
+    RESEND_ENABLED=os.getenv("RESEND_ENABLED", "").strip().lower() in ("1", "true", "yes"),
 )
 
 csrf = CSRFProtect(app)
@@ -82,7 +89,15 @@ if IS_VERCEL and RATELIMIT_STORAGE_URI == "memory://":
         "across Vercel serverless instances."
     )
 
-AUTH_ENDPOINTS = {"login", "signup", "forgot_password", "reset_password", "account"}
+AUTH_ENDPOINTS = {
+    "login",
+    "signup",
+    "signup_verify",
+    "signup_resend",
+    "forgot_password",
+    "reset_password",
+    "account",
+}
 
 
 @app.after_request
@@ -187,10 +202,30 @@ class User(db.Model):
     uid = db.Column(db.Integer,primary_key=True)
     username = db.Column(db.String,nullable=False,unique=True)
     password = db.Column(db.String,nullable=False)
-    email = db.Column(db.String,nullable=True)
+    email = db.Column(db.String,nullable=False)
+    email_verified = db.Column(db.Boolean,nullable=False,default=False)
 
     def __repr__(self):
         return f'<User: {self.username}>'
+
+
+class EmailVerification(db.Model):
+    __tablename__ = 'email_verifications'
+
+    id = db.Column(db.Integer,primary_key=True)
+    token = db.Column(db.String,nullable=False,unique=True)
+    username = db.Column(db.String,nullable=False)
+    email = db.Column(db.String,nullable=False,index=True)
+    password_hash = db.Column(db.String,nullable=False)
+    otp_hash = db.Column(db.String,nullable=False)
+    attempts = db.Column(db.Integer,nullable=False,default=0)
+    used = db.Column(db.Boolean,nullable=False,default=False)
+    expires_at = db.Column(db.DateTime,nullable=False)
+    last_sent_at = db.Column(db.DateTime,nullable=False)
+    created_at = db.Column(db.DateTime,nullable=False)
+
+    def __repr__(self):
+        return f'<EmailVerification: {self.email}>'
 
 class Memory(db.Model):
     __tablename__ = 'memories'

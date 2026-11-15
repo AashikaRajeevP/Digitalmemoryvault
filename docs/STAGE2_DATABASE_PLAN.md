@@ -97,18 +97,22 @@ Each item below is one revision. Revision order may shift as features land.
 - Downgrade: drop the index.
 - Risk: low. Builds an index only; no data change.
 
-### 4.2 Add `users.email` and `users.email_verified_at`
+### 4.2 Add `users.email` and email verification (IMPLEMENTED)
 
-- Change: add `email` (nullable, unique) and `email_verified_at` (nullable
-  timestamp). Nullable first so the 7 existing users are not broken.
-- Backfill: users add their own email via account settings; no bulk backfill.
-- Follow-up (separate revision): add a partial/unique index on `email` where not
-  null if the dialect requires it (SQLite and Postgres both allow multiple NULLs
-  in a unique column, so a plain unique constraint is acceptable).
-- Downgrade: drop both columns.
-- Risk: medium. Adding a unique column is safe when nullable; verify no duplicate
-  emails before tightening.
-- Config/UI: account settings page, email validation, decision on verification.
+Status: implemented as `6694a1a15bcb` (add `users.email` + unique index
+`ix_users_email`) and `fc35b4ffa9c0` (add `email_verifications`, add
+`users.email_verified`, set `users.email` NOT NULL). The original plan to add a
+nullable column and backfill was replaced by a full reset because production data is
+disposable (approved). `email_verified_at` was not added; a boolean
+`email_verified` plus the `email_verifications` challenge table is used instead.
+
+- Change: `users.email` (NOT NULL, unique index), `users.email_verified`
+  (NOT NULL DEFAULT false), and table `email_verifications` (token UNIQUE,
+  username, email indexed, password_hash, otp_hash, attempts, used, expires_at,
+  last_sent_at, created_at).
+- Downgrade: drop the table, drop `email_verified`, and make `email` nullable.
+- Risk: medium. Requires a clean reset (approved) because `email` is NOT NULL.
+- Config/UI: signup OTP verification, login by email, account settings page.
 
 ### 4.3 Add `users.auth_version` (session invalidation)
 
@@ -167,22 +171,30 @@ Each item below is one revision. Revision order may shift as features land.
 ## 6. Production (Neon) procedure - requires approval
 
 Do not perform any of these steps without a verified backup and explicit approval.
+The authoritative, step-by-step runbook is `PROJECT_STATUS.md` section 12. Summary:
 
-1. Confirm Vercel is on the intended commit and take a fresh, verified Neon backup
-   (repeat the 2026-11-14 backup procedure; verify row counts and checksums).
-2. Inspect the live schema to confirm it matches baseline `897fe5622bb6`.
-3. Stamp the existing database as the baseline without running its DDL:
-   `flask --app app db stamp 897fe5622bb6` (run against Neon once, deliberately).
-4. Apply exactly one migration at a time: `flask --app app db upgrade`.
-5. After each migration, verify the live schema and row counts, and smoke-test
-   signup/login/memory flows.
-6. Keep the pre-migration backup until the change is confirmed healthy.
+1. Take a fresh Neon backup with `pg_dump --format=custom`.
+2. Verify the backup by restoring it into a SEPARATE disposable PostgreSQL database
+   and comparing row counts. `pg_restore --list` is not sufficient verification.
+3. Because the existing production data is disposable (approved), reset ONLY the
+   application objects instead of stamping the legacy schema:
+   `DROP TABLE IF EXISTS email_verifications, memories, users, alembic_version CASCADE;`
+   (drop `memories` before `users`; do not use `DROP SCHEMA public CASCADE`).
+4. Apply the full chain from base: `flask --app app db upgrade` -> head
+   `fc35b4ffa9c0`.
+5. Verify the live schema and smoke-test signup/login/memory flows.
+6. Keep the pre-reset backup until the change is confirmed healthy.
+
+The full chain `897fe5622bb6 -> 6694a1a15bcb -> fc35b4ffa9c0` has been validated
+against a fresh, disposable PostgreSQL 16.4 database (not only SQLite), including
+`flask db check`, `downgrade base`, re-`upgrade`, and a `pg_dump`/`pg_restore`
+round-trip. See `PROJECT_STATUS.md` section 12.
 
 Deployment gap to resolve before the first production migration: the repository has
-no `vercel.json` and no build step that runs `flask db upgrade`. Decide whether
-migrations run as a manual release step or an automated build/release hook, and
-document it. Until then, run `flask db upgrade` manually against Neon as an
-approved, backed-up operation.
+no `vercel.json` and no build step that runs `flask db upgrade`. Migrations must run
+as a manual release step before the new code is served. Until then, run
+`flask --app app db upgrade` manually against Neon as an approved, backed-up
+operation.
 
 ## 7. Test strategy
 
@@ -198,9 +210,12 @@ approved, backed-up operation.
 
 ## 8. Rollout order (recommended)
 
-1. Baseline stamp on Neon (approval required) - no schema change.
-2. `memories.user_id` index.
-3. `users.email` + `email_verified_at`, then account settings UI.
+1. Reset Neon to base and apply the full chain (approval required) - see section 6
+   and `PROJECT_STATUS.md` section 12. Superseded the original "baseline stamp"
+   approach because production data is disposable.
+2. `users.email` + `email_verifications` (signup OTP) + account settings UI -
+   DONE (`6694a1a15bcb`, `fc35b4ffa9c0`).
+3. `memories.user_id` index.
 4. `users.auth_version` + session invalidation.
 5. `password_reset_tokens` + Resend flows.
 6. `photos` + Cloudinary uploads and CSP/config review.
@@ -209,7 +224,7 @@ approved, backed-up operation.
 
 ## 9. Open questions
 
-- Email verification: required, optional, or deferred?
+- Email verification: resolved - required at signup via a 6-digit OTP (`fc35b4ffa9c0`).
 - Cover-photo selection UX and locked-memory photo preview rules.
 - Retention policy for reset tokens and expired/used rows.
 - Whether to automate `flask db upgrade` in the Vercel release step.

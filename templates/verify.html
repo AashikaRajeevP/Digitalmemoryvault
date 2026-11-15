@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% block title %} VERIFY EMAIL {% endblock %}
+
+{% block content %}
+<h1> VERIFY YOUR EMAIL </h1>
+Enter the 6-digit code we sent to {{ email }}.
+
+<form method="POST" action="{{url_for('signup_verify')}}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="text" name="otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+           placeholder="6-digit code" autocomplete="one-time-code"><br>
+    <input type="submit" value="Verify">
+</form>
+
+<form method="POST" action="{{url_for('signup_resend')}}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="submit" value="Resend code">
+</form>
+
+<a href="{{url_for('signup')}}">Start over</a>
+{% endblock %}

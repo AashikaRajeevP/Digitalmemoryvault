@@ -46,3 +46,28 @@ def app(app_module):
 @pytest.fixture
 def client(app):
     return app.test_client()
+
+
+@pytest.fixture
+def sent_emails(monkeypatch):
+    import routes
+
+    captured = []
+
+    def fake_send(to_email, otp):
+        captured.append((to_email, otp))
+        return True
+
+    monkeypatch.setattr(routes, "send_otp_email", fake_send)
+    return captured
+
+
+@pytest.fixture
+def failing_email(monkeypatch):
+    import routes
+
+    def fake_send(to_email, otp):
+        return False
+
+    monkeypatch.setattr(routes, "send_otp_email", fake_send)
+    return fake_send

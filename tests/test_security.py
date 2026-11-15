@@ -6,11 +6,20 @@ from werkzeug.security import check_password_hash
 from services.security import hash_password, is_password_hash
 
 
-def create_user(app_module, username="alice", password="password1234", hashed=True):
+def create_user(
+    app_module,
+    username="alice",
+    password="password1234",
+    hashed=True,
+    email=None,
+    email_verified=True,
+):
     with app_module.app.app_context():
         user = app_module.User(
             username=username,
             password=hash_password(password) if hashed else password,
+            email=email or f"{username}@example.com",
+            email_verified=email_verified,
         )
         app_module.db.session.add(user)
         app_module.db.session.commit()
@@ -40,7 +49,7 @@ def csrf_token_from(response):
     return match.group(1)
 
 
-def test_signup_hashes_password(client, app_module):
+def test_signup_hashes_password(client, app_module, sent_emails):
     response = client.post(
         "/signup",
         data={
@@ -51,13 +60,20 @@ def test_signup_hashes_password(client, app_module):
     )
 
     assert response.status_code == 302
-    assert response.headers["Location"].endswith("/login")
+    assert response.headers["Location"].endswith("/signup/verify")
+    assert sent_emails[-1][0] == "alice@example.com"
+
+    verified = client.post("/signup/verify", data={"otp": sent_emails[-1][1]})
+
+    assert verified.status_code == 302
+    assert verified.headers["Location"].endswith("/login")
 
     with app_module.app.app_context():
         user = app_module.User.query.filter_by(username="alice").one()
         assert user.password != "password1234"
         assert is_password_hash(user.password)
         assert check_password_hash(user.password, "password1234")
+        assert user.email_verified is True
 
 
 def test_signup_rejects_duplicate_username(client, app_module):
@@ -82,7 +98,7 @@ def test_signup_rejects_duplicate_username(client, app_module):
     assert second.status_code == 400
 
     with app_module.app.app_context():
-        assert app_module.User.query.filter_by(username="alice").count() == 1
+        assert app_module.EmailVerification.query.filter_by(username="alice").count() == 1
 
 
 def test_password_minimum_length_default_is_12(app):
@@ -113,7 +129,7 @@ def test_authenticated_pages_render(client, app_module):
     mid = create_memory(app_module, uid)
     client.post(
         "/login",
-        data={"username": "alice", "password": "password1234"},
+        data={"email": "alice@example.com", "password": "password1234"},
     )
 
     for path in ("/", "/create_memory", "/my_memories", f"/memory_detail/{mid}"):
@@ -125,7 +141,7 @@ def test_login_works_with_hashed_password(client, app_module):
 
     response = client.post(
         "/login",
-        data={"username": "alice", "password": "password1234"},
+        data={"email": "alice@example.com", "password": "password1234"},
     )
 
     assert response.status_code == 302
@@ -140,7 +156,7 @@ def test_legacy_plaintext_password_is_upgraded_on_login(client, app_module):
 
     response = client.post(
         "/login",
-        data={"username": "alice", "password": "password1234"},
+        data={"email": "alice@example.com", "password": "password1234"},
     )
 
     assert response.status_code == 302
@@ -156,17 +172,32 @@ def test_invalid_login_uses_generic_error(client, app_module):
 
     wrong_password = client.post(
         "/login",
-        data={"username": "alice", "password": "wrong-password"},
+        data={"email": "alice@example.com", "password": "wrong-password"},
     )
     unknown_user = client.post(
         "/login",
-        data={"username": "nobody", "password": "wrong-password"},
+        data={"email": "nobody@example.com", "password": "wrong-password"},
     )
 
     assert wrong_password.status_code == 401
     assert unknown_user.status_code == 401
-    assert b"Invalid username or password" in wrong_password.data
-    assert b"Invalid username or password" in unknown_user.data
+    assert b"Invalid email or password" in wrong_password.data
+    assert b"Invalid email or password" in unknown_user.data
+
+
+def test_unverified_user_cannot_login(client, app_module):
+    create_user(app_module, email_verified=False)
+
+    response = client.post(
+        "/login",
+        data={"email": "alice@example.com", "password": "password1234"},
+    )
+
+    assert response.status_code == 401
+    assert b"Invalid email or password" in response.data
+
+    with client.session_transaction() as session:
+        assert "user_id" not in session
 
 
 def test_memory_detail_requires_login(client, app_module):
@@ -186,7 +217,7 @@ def test_memory_detail_is_owner_only(client, app_module):
 
     client.post(
         "/login",
-        data={"username": "bob", "password": "password1234"},
+        data={"email": "bob@example.com", "password": "password1234"},
     )
     response = client.get(f"/memory_detail/{mid}")
     assert response.status_code == 404
@@ -194,7 +225,7 @@ def test_memory_detail_is_owner_only(client, app_module):
     client.post("/logout")
     client.post(
         "/login",
-        data={"username": "alice", "password": "password1234"},
+        data={"email": "alice@example.com", "password": "password1234"},
     )
     response = client.get(f"/memory_detail/{mid}")
     assert response.status_code == 200
@@ -204,7 +235,7 @@ def test_create_memory_rejects_invalid_date(client, app_module):
     create_user(app_module)
     client.post(
         "/login",
-        data={"username": "alice", "password": "password1234"},
+        data={"email": "alice@example.com", "password": "password1234"},
     )
 
     response = client.post(
@@ -258,7 +289,7 @@ def test_https_login_csrf_requires_same_origin_referer(client, app):
         base_url=base_url,
         data={
             "csrf_token": token,
-            "username": "nobody",
+            "email": "nobody@example.com",
             "password": "password1234",
         },
     )
@@ -270,12 +301,12 @@ def test_https_login_csrf_requires_same_origin_referer(client, app):
         headers={"Referer": f"{base_url}/login"},
         data={
             "csrf_token": token,
-            "username": "nobody",
+            "email": "nobody@example.com",
             "password": "password1234",
         },
     )
     assert same_origin_referer.status_code == 401
-    assert b"Invalid username or password" in same_origin_referer.data
+    assert b"Invalid email or password" in same_origin_referer.data
 
 
 def test_https_signup_csrf_requires_same_origin_referer(client, app, app_module):
@@ -313,14 +344,18 @@ def test_https_signup_csrf_requires_same_origin_referer(client, app, app_module)
     assert same_origin_referer.status_code == 302
 
     with app_module.app.app_context():
-        assert app_module.User.query.filter_by(username="https-user").one()
+        assert (
+            app_module.EmailVerification.query.filter_by(username="https-user").count()
+            == 1
+        )
+        assert app_module.User.query.filter_by(username="https-user").count() == 0
 
 
 def test_logout_requires_post(client, app_module):
     create_user(app_module)
     client.post(
         "/login",
-        data={"username": "alice", "password": "password1234"},
+        data={"email": "alice@example.com", "password": "password1234"},
     )
 
     assert client.get("/logout").status_code == 405
