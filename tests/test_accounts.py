@@ -31,7 +31,6 @@ def test_signup_stores_normalized_email(client, app_module, sent_emails):
     response = client.post(
         "/signup",
         data={
-            "username": "alice",
             "password": "password1234",
             "email": "  Alice@Example.COM ",
         },
@@ -40,20 +39,24 @@ def test_signup_stores_normalized_email(client, app_module, sent_emails):
     assert response.status_code == 302
 
     with app_module.app.app_context():
-        challenge = app_module.EmailVerification.query.filter_by(username="alice").one()
+        challenge = app_module.EmailVerification.query.filter_by(
+            email="alice@example.com"
+        ).one()
         assert challenge.email == "alice@example.com"
+        assert challenge.username == "user:alice@example.com"
 
     client.post("/signup/verify", data={"otp": sent_emails[-1][1]})
 
     with app_module.app.app_context():
-        user = app_module.User.query.filter_by(username="alice").one()
+        user = app_module.User.query.filter_by(email="alice@example.com").one()
         assert user.email == "alice@example.com"
+        assert user.username == "user:alice@example.com"
 
 
 def test_signup_requires_email(client, app_module):
     response = client.post(
         "/signup",
-        data={"username": "alice", "password": "password1234"},
+        data={"password": "password1234"},
     )
 
     assert response.status_code == 400
@@ -68,7 +71,6 @@ def test_signup_rejects_invalid_email(client, app_module):
     response = client.post(
         "/signup",
         data={
-            "username": "alice",
             "password": "password1234",
             "email": "not-an-email",
         },
@@ -87,7 +89,6 @@ def test_signup_rejects_email_already_registered(client, app_module):
     response = client.post(
         "/signup",
         data={
-            "username": "bob",
             "password": "password1234",
             "email": "shared@example.com",
         },
@@ -103,7 +104,6 @@ def test_signup_rejects_registered_email_case_insensitively(client, app_module):
     response = client.post(
         "/signup",
         data={
-            "username": "bob",
             "password": "password1234",
             "email": "SHARED@example.com",
         },
@@ -137,6 +137,16 @@ def test_account_page_shows_current_email(client, app_module):
 
     assert response.status_code == 200
     assert b"alice@example.com" in response.data
+
+
+def test_account_page_does_not_show_username(client, app_module):
+    make_user(app_module, email="alice@example.com")
+    login(client)
+
+    response = client.get("/account")
+
+    assert response.status_code == 200
+    assert b"Username:" not in response.data
 
 
 def test_account_page_allows_updating_email(client, app_module):

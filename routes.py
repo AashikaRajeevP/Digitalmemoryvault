@@ -29,6 +29,69 @@ def _purge_expired_verifications():
     db.session.commit()
 
 
+INTERNAL_USERNAME_PREFIX = "user:"
+MAX_USERNAME_GENERATION_ATTEMPTS = 5
+
+
+def _generate_internal_username(email):
+    """Return an internal username that is not already used by an account.
+
+    The legacy users.username column is still NOT NULL UNIQUE, but username is
+    no longer collected at signup or used for login. New accounts get a
+    generated value based on the normalized email. If an old account already
+    owns that value, add a numeric suffix until a free value is found.
+    """
+    base = f"{INTERNAL_USERNAME_PREFIX}{email}"
+    candidate = base
+    suffix = 2
+
+    while User.query.filter_by(username=candidate).first() is not None:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+
+    return candidate
+
+
+def _create_verified_user(challenge):
+    """Create a verified user for the challenge, retrying username collisions.
+
+    Returns (user, error). error is None on success, "email_taken" when the
+    email was registered in the meantime, "challenge_missing" when the pending
+    challenge disappeared, or "failed" after repeated database conflicts.
+    """
+    challenge_id = challenge.id
+
+    for _ in range(MAX_USERNAME_GENERATION_ATTEMPTS):
+        challenge = db.session.get(EmailVerification, challenge_id)
+
+        if challenge is None or challenge.used:
+            return None, "challenge_missing"
+
+        if User.query.filter_by(email=challenge.email).first() is not None:
+            challenge.used = True
+            db.session.commit()
+            return None, "email_taken"
+
+        username = _generate_internal_username(challenge.email)
+        user = User(
+            username=username,
+            email=challenge.email,
+            password=challenge.password_hash,
+            email_verified=True,
+        )
+        challenge.username = username
+        challenge.used = True
+        db.session.add(user)
+
+        try:
+            db.session.commit()
+            return user, None
+        except IntegrityError:
+            db.session.rollback()
+
+    return None, "failed"
+
+
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
@@ -68,15 +131,10 @@ def signup():
     if request.method == 'GET':
         return render_template('signup.html')
 
-    username = request.form.get('username', '').strip()
     password = request.form.get('password', '')
     email = normalize_email(request.form.get('email', ''))
     min_length = app.config['PASSWORD_MIN_LENGTH']
     max_length = app.config['PASSWORD_MAX_LENGTH']
-
-    if not 3 <= len(username) <= 80:
-        flash("Username must be between 3 and 80 characters.", "error")
-        return render_template('signup.html'), 400
 
     if len(password) < min_length:
         flash(f"Password must be at least {min_length} characters.", "error")
@@ -92,24 +150,18 @@ def signup():
 
     _purge_expired_verifications()
 
-    if User.query.filter(
-        (User.username == username) | (User.email == email)
-    ).first() is not None:
-        flash("That username or email is already in use.", "error")
+    if User.query.filter_by(email=email).first() is not None:
+        flash("That email address is already in use.", "error")
         return render_template('signup.html'), 400
 
     EmailVerification.query.filter_by(email=email, used=False).update(
         {"used": True}, synchronize_session=False
     )
 
-    if EmailVerification.query.filter_by(username=username, used=False).first() is not None:
-        db.session.rollback()
-        flash("That username is already in use.", "error")
-        return render_template('signup.html'), 400
-
     token = secrets.token_urlsafe(32)
     otp = generate_otp()
     now = _utcnow()
+    username = _generate_internal_username(email)
 
     challenge = EmailVerification(
         token=token,
@@ -186,25 +238,22 @@ def signup_verify():
         flash("That code is incorrect.", "error")
         return render_template('verify.html', email=challenge.email), 400
 
-    challenge.used = True
+    _user, error = _create_verified_user(challenge)
 
-    if User.query.filter(
-        (User.username == challenge.username) | (User.email == challenge.email)
-    ).first() is not None:
-        db.session.commit()
+    if error == "email_taken":
         session.pop('pending_signup_token', None)
-        flash("That username or email is already in use.", "error")
+        flash("That email address is already in use.", "error")
         return redirect(url_for('login'))
 
-    user = User(
-        username=challenge.username,
-        email=challenge.email,
-        password=challenge.password_hash,
-        email_verified=True,
-    )
+    if error == "challenge_missing":
+        session.pop('pending_signup_token', None)
+        flash("Please start signup again.", "error")
+        return redirect(url_for('signup'))
 
-    db.session.add(user)
-    db.session.commit()
+    if error is not None:
+        session.pop('pending_signup_token', None)
+        flash("We could not create your account. Please try again.", "error")
+        return redirect(url_for('signup'))
 
     session.pop('pending_signup_token', None)
     flash("Account verified. Please log in.", "success")

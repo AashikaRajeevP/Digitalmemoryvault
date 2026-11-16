@@ -3,7 +3,6 @@
 
 {% block content %}
 <h1>ACCOUNT SETTINGS</h1>
-<p>Username: {{ user.username }}</p>
 <p>Email: {{ user.email or 'Not set' }}</p>
 
 <form method="POST" action="{{ url_for('account') }}">

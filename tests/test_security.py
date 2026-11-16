@@ -53,7 +53,6 @@ def test_signup_hashes_password(client, app_module, sent_emails):
     response = client.post(
         "/signup",
         data={
-            "username": "alice",
             "password": "password1234",
             "email": "alice@example.com",
         },
@@ -69,36 +68,19 @@ def test_signup_hashes_password(client, app_module, sent_emails):
     assert verified.headers["Location"].endswith("/login")
 
     with app_module.app.app_context():
-        user = app_module.User.query.filter_by(username="alice").one()
+        user = app_module.User.query.filter_by(email="alice@example.com").one()
+        assert user.username == "user:alice@example.com"
         assert user.password != "password1234"
         assert is_password_hash(user.password)
         assert check_password_hash(user.password, "password1234")
         assert user.email_verified is True
 
 
-def test_signup_rejects_duplicate_username(client, app_module):
-    first = client.post(
-        "/signup",
-        data={
-            "username": "alice",
-            "password": "password1234",
-            "email": "alice@example.com",
-        },
-    )
-    second = client.post(
-        "/signup",
-        data={
-            "username": "alice",
-            "password": "password1234",
-            "email": "alice2@example.com",
-        },
-    )
+def test_signup_page_does_not_ask_for_username(client):
+    response = client.get("/signup")
 
-    assert first.status_code == 302
-    assert second.status_code == 400
-
-    with app_module.app.app_context():
-        assert app_module.EmailVerification.query.filter_by(username="alice").count() == 1
+    assert response.status_code == 200
+    assert b'name="username"' not in response.data
 
 
 def test_password_minimum_length_default_is_12(app):
@@ -109,7 +91,6 @@ def test_signup_enforces_minimum_password_length(client):
     response = client.post(
         "/signup",
         data={
-            "username": "alice",
             "password": "x" * 11,
             "email": "alice@example.com",
         },
@@ -323,7 +304,6 @@ def test_https_signup_csrf_requires_same_origin_referer(client, app, app_module)
         base_url=base_url,
         data={
             "csrf_token": token,
-            "username": "https-user",
             "password": "password1234",
             "email": "https-user@example.com",
         },
@@ -336,7 +316,6 @@ def test_https_signup_csrf_requires_same_origin_referer(client, app, app_module)
         headers={"Referer": f"{base_url}/signup"},
         data={
             "csrf_token": token,
-            "username": "https-user",
             "password": "password1234",
             "email": "https-user@example.com",
         },
@@ -345,10 +324,14 @@ def test_https_signup_csrf_requires_same_origin_referer(client, app, app_module)
 
     with app_module.app.app_context():
         assert (
-            app_module.EmailVerification.query.filter_by(username="https-user").count()
+            app_module.EmailVerification.query.filter_by(
+                email="https-user@example.com"
+            ).count()
             == 1
         )
-        assert app_module.User.query.filter_by(username="https-user").count() == 0
+        assert (
+            app_module.User.query.filter_by(email="https-user@example.com").count() == 0
+        )
 
 
 def test_logout_requires_post(client, app_module):
@@ -373,7 +356,6 @@ def test_csrf_is_required_for_signup(client, app):
     response = client.post(
         "/signup",
         data={
-            "username": "alice",
             "password": "password1234",
             "email": "alice@example.com",
         },

@@ -9,10 +9,10 @@ def utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def signup(client, username="alice", email="alice@example.com", password="password1234"):
+def signup(client, email="alice@example.com", password="password1234"):
     return client.post(
         "/signup",
-        data={"username": username, "email": email, "password": password},
+        data={"email": email, "password": password},
     )
 
 
@@ -36,7 +36,7 @@ def test_signup_creates_pending_challenge_not_user(client, app_module, sent_emai
     with app_module.app.app_context():
         assert app_module.User.query.count() == 0
         challenge = app_module.EmailVerification.query.one()
-        assert challenge.username == "alice"
+        assert challenge.username == "user:alice@example.com"
         assert challenge.email == "alice@example.com"
         assert challenge.used is False
         assert challenge.attempts == 0
@@ -91,7 +91,7 @@ def test_verify_success_creates_verified_user_and_redirects_login(
 
     with app_module.app.app_context():
         user = app_module.User.query.one()
-        assert user.username == "alice"
+        assert user.username == "user:alice@example.com"
         assert user.email == "alice@example.com"
         assert user.email_verified is True
         challenge = app_module.EmailVerification.query.one()
@@ -324,7 +324,7 @@ def test_expired_challenges_are_purged_on_signup(client, app_module, sent_emails
         app_module.db.session.add(stale)
         app_module.db.session.commit()
 
-    signup(client, username="alice", email="alice@example.com")
+    signup(client, email="alice@example.com")
 
     with app_module.app.app_context():
         assert (
@@ -351,15 +351,46 @@ def test_login_does_not_send_otp(client, app_module, sent_emails):
     assert sent_emails == []
 
 
-def test_verify_rejects_username_taken_between_signup_and_verify(
+def test_signup_generates_unique_username_when_internal_name_taken(
+    client, app_module, sent_emails
+):
+    with app_module.app.app_context():
+        app_module.db.session.add(
+            app_module.User(
+                username="user:alice@example.com",
+                password="x",
+                email="legacy@example.com",
+                email_verified=True,
+            )
+        )
+        app_module.db.session.commit()
+
+    signup(client)
+
+    with app_module.app.app_context():
+        challenge = app_module.EmailVerification.query.filter_by(
+            email="alice@example.com"
+        ).one()
+        assert challenge.username == "user:alice@example.com-2"
+
+    verify(client, sent_emails[0][1])
+
+    with app_module.app.app_context():
+        user = app_module.User.query.filter_by(email="alice@example.com").one()
+        assert user.username == "user:alice@example.com-2"
+
+
+def test_verify_handles_internal_username_taken_between_signup_and_verify(
     client, app_module, sent_emails
 ):
     signup(client)
 
     with app_module.app.app_context():
+        challenge = app_module.EmailVerification.query.one()
+        taken_username = challenge.username
         app_module.db.session.add(
             app_module.User(
-                username="alice",
+                username=taken_username,
                 password="x",
                 email="other@example.com",
                 email_verified=True,
@@ -373,4 +404,35 @@ def test_verify_rejects_username_taken_between_signup_and_verify(
     assert response.headers["Location"].endswith("/login")
 
     with app_module.app.app_context():
+        assert app_module.User.query.count() == 2
+        user = app_module.User.query.filter_by(email="alice@example.com").one()
+        assert user.username == f"{taken_username}-2"
+
+
+def test_verify_rejects_email_taken_between_signup_and_verify(
+    client, app_module, sent_emails
+):
+    signup(client)
+
+    with app_module.app.app_context():
+        app_module.db.session.add(
+            app_module.User(
+                username="someone",
+                password="x",
+                email="alice@example.com",
+                email_verified=True,
+            )
+        )
+        app_module.db.session.commit()
+
+    response = verify(client, sent_emails[0][1])
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/login")
+
+    with app_module.app.app_context():
         assert app_module.User.query.count() == 1
+        assert (
+            app_module.User.query.filter_by(email="alice@example.com").one().username
+            == "someone"
+        )

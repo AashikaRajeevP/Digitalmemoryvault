@@ -1,12 +1,12 @@
 # Digital Memory Vault - Project Status
 
-Last updated: 2026-11-15
+Last updated: 2026-11-16
 
 - Repository: `AashikaRajeevP/memoryvault`
 - Branch: `master`
-- HEAD: `1d0207f Add email support and account settings`
-- Remote status: local `HEAD` matches `origin/master` (`1d0207f`); it was not pushed from this session.
-- Working tree at inspection: the Stage 3 FIX (signup email verification + login-by-email redesign) is uncommitted. Modified: `app.py`, `routes.py`, `templates/login.html`, `tests/conftest.py`, `tests/test_accounts.py`, `tests/test_security.py`, `.env.example`, `requirements.txt`, `PROJECT_STATUS.md`, `docs/STAGE2_DATABASE_PLAN.md`; new: `services/otp.py`, `services/email.py`, `templates/verify.html`, `migrations/versions/fc35b4ffa9c0_email_verification.py`, `tests/test_signup_verification.py`, `tests/test_email_service.py`. Not committed, not pushed, not deployed.
+- HEAD: `112a1b2 Correct Stage 3 production migration runbook`
+- Remote status: local `HEAD` matches `origin/master` (`112a1b2`).
+- Working tree at inspection: the signup simplification (email/password only, generated internal username) is uncommitted. Modified: `routes.py`, `templates/signup.html`, `templates/account.html`, `tests/test_accounts.py`, `tests/test_security.py`, `tests/test_signup_verification.py`, `PROJECT_STATUS.md`. The existing database schema is unchanged. Not committed, not pushed, not deployed.
 
 ## Status Legend
 
@@ -69,7 +69,7 @@ The long-term goal is to extend the vault with photo attachments, voice memories
 
 Implemented and locally tested:
 
-- Two-step signup: collect username, email, and password, then verify a 6-digit code emailed via Resend before the account is created.
+- Two-step signup: collect email and password only, then verify a 6-digit code emailed via Resend before the account is created. The legacy `username` column is filled with a generated internal value (`user:<normalized_email>`, with a numeric suffix if needed) and is not shown to the user.
 - Email verification OTP: single-use, 5-minute expiry, HMAC-SHA256 hashed (never stored or logged in plaintext), attempt-limited, resend cooldown, session-bound, and previous codes invalidated on resend.
 - User login by email with hashed passwords; unverified accounts cannot log in.
 - Required email on user accounts with format validation, normalization, and uniqueness.
@@ -83,7 +83,7 @@ Implemented and locally tested:
 - Locked-memory countdown in the memory list.
 - Home dashboard with total, locked, and unlocked counts.
 - Per-user memory ownership checks.
-- Input validation for usernames, passwords, titles, messages, and open dates.
+- Input validation for emails, passwords, titles, messages, and open dates.
 - Flash messages and a shared error page.
 - Security headers and CSRF protection.
 - Rate limiting for signup, login, and memory creation.
@@ -172,7 +172,7 @@ Stage 1 is **implemented, tested locally, committed, and pushed**. Production ve
 
 ## 5. Stage 3 Email, Account Settings, and Signup Verification
 
-Stage 3 FIX is **implemented and tested locally**. It is **not committed**, and the database **has not been migrated in production**.
+Stage 3 FIX is **implemented, tested locally, committed, and pushed**. Signup was then simplified to email and password only; that follow-up is **implemented and tested locally** but not yet committed. See sections 8 and 12 for production database status.
 
 ### Email field
 
@@ -183,9 +183,12 @@ Stage 3 FIX is **implemented and tested locally**. It is **not committed**, and 
 
 ### Signup (two-step with OTP)
 
-- `GET/POST /signup` validates username, password, and email, then creates a pending `EmailVerification` row. No `User` row is created yet.
+- `GET/POST /signup` validates password and email, then creates a pending `EmailVerification` row. No `User` row is created yet.
+- The signup page collects **email and password only**. No username is shown or accepted from the user.
+- The legacy `users.username` column remains `NOT NULL UNIQUE` (the schema is unchanged). New accounts receive an internal generated username: `user:<normalized_email>`. If that value already belongs to an old account, a numeric suffix (`-2`, `-3`, ...) is added until it is free.
 - A 6-digit code is emailed via Resend and the pending challenge token is stored in the session (`pending_signup_token`).
-- `POST /signup/verify` verifies the code, re-checks username/email uniqueness, then creates the `User` with `email_verified=True`.
+- `POST /signup/verify` verifies the code, re-checks email uniqueness, generates a fresh unique internal username, then creates the `User` with `email_verified=True`.
+- If an internal username collision occurs between signup and verification, the user creation is retried with the next free suffix; if the email was registered in the meantime, the challenge is closed and the user is asked to log in.
 - After successful verification the user is **not** logged in; they are redirected to `/login` (decision 3).
 - `POST /signup/resend` issues a new code subject to a cooldown; the previous code is invalidated.
 - Duplicate emails that belong to an already-registered user are rejected; a pending (unverified) signup for the same email is replaced as a retry.
@@ -226,16 +229,16 @@ Stage 3 FIX is **implemented and tested locally**. It is **not committed**, and 
 - Revision: `fc35b4ffa9c0` (`email verification`), down revision `6694a1a15bcb` (additive; history preserved).
 - Adds the `email_verifications` table, adds `users.email_verified` (`NOT NULL DEFAULT false`), and alters `users.email` to `NOT NULL`.
 - Validated on a disposable SQLite database: `flask db upgrade` applies cleanly, `flask db check` reports no drift, and the `ix_users_email` unique index survives the batch table rebuild.
-- Not applied to Neon.
+- Reported applied to Neon on 2026-11-16 (Alembic head `fc35b4ffa9c0`); not independently verified in this session.
 
 ## 6. Current Deployment Status
 
 ### Vercel
 
 - The project is deployed/reported as deployed on Vercel.
-- The current HEAD `1d0207f` matches `origin/master`; the Stage 3 FIX working-tree changes are not committed or pushed.
-- Vercel deployment of the Stage 3 FIX is **not verified from this session**.
-- Production signup/login verification is still pending; production is currently broken because `users.email` does not exist in Neon (see section 8).
+- The current HEAD `112a1b2` matches `origin/master`. The signup simplification is uncommitted and not deployed.
+- Vercel deployment of the signup simplification is **not verified from this session**.
+- The user reports that the Neon production migration completed with Alembic head `fc35b4ffa9c0`; this was **not independently verified** in this inspection.
 
 ### Neon PostgreSQL
 
@@ -272,7 +275,7 @@ python -m pytest -q
 Latest result:
 
 ```text
-63 passed
+66 passed
 ```
 
 Test coverage includes:
@@ -294,15 +297,20 @@ Test coverage includes:
 - Login does not send an OTP.
 - Signup hashes passwords.
 - Signup stores a normalized email.
+- Signup generates the internal username `user:<normalized_email>`.
+- A generated username collision adds a numeric suffix.
+- A username collision between signup and verification is retried safely.
 - Signup requires a valid email and rejects invalid formats.
 - Registered duplicate emails are rejected (case-insensitively).
+- The signup page does not ask for a username.
+- An email registered between signup and verification is rejected.
 - Verified users can log in by email; unverified users cannot.
 - Account settings requires login.
 - Account settings shows and updates the current user's email.
+- Account settings does not display the internal username.
 - Account updates reject invalid and duplicate emails.
 - A user cannot modify another user's account.
 - Account updates require a CSRF token.
-- Duplicate usernames are rejected.
 - Minimum password length is 12.
 - Public pages render.
 - Authenticated pages render.
@@ -332,6 +340,8 @@ Important testing caveats:
 
 ### Neon status at last inspection
 
+> Update 2026-11-16: the user reports that the production Neon migration completed and the current Alembic head is `fc35b4ffa9c0`. The 2026-11-14 inspection below is retained as historical context; it was not rechecked in this session.
+
 Last verified: 2026-11-14 during read-only backup/inspection. This was not rechecked during the current review.
 
 - Database: Neon `neondb`
@@ -339,7 +349,7 @@ Last verified: 2026-11-14 during read-only backup/inspection. This was not reche
 - Users: 7 rows
 - Memories: 6 rows
 - `users` columns: `uid`, `username`, `password`
-- No `email` column in production; the code now defines `email` (NOT NULL) via migrations `6694a1a15bcb` and `fc35b4ffa9c0`, which are not yet applied to Neon. This mismatch is why production signup/login currently return HTTP 500.
+- At that inspection there was no `email` column in production, which was why production signup/login returned HTTP 500 before the migration. The code defines `email` (NOT NULL) via migrations `6694a1a15bcb` and `fc35b4ffa9c0`; the user reports these are now applied.
 - All 7 passwords were plaintext at inspection time
 - No `alembic_version` table
 - No password-reset-token table
@@ -368,16 +378,16 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 - Do not run tests against Neon.
 - Re-inspect production schema and counts before planning the next database change.
 - The app now uses Alembic migrations (`migrations/`); the import-time `db.create_all()` was removed.
-- Migration `6694a1a15bcb` (email) and `fc35b4ffa9c0` (email verification) must not be applied to Neon until the baseline is stamped and a fresh backup is verified.
-- The agreed production plan (pending separate approval) is to discard the existing Neon data after a verified backup, then run the full migration chain from scratch (see section 12). Do not delete production data or run migrations against Neon without explicit approval.
-- Production database status: not migrated. Neon still has no `alembic_version` table, no `email` column, and no `ix_users_email` index.
+- Future migrations must be tested on a disposable database and applied to Neon only after a verified backup and explicit approval.
+- The pre-migration reset plan in section 12 is retained as historical context. Do not delete production data or run migrations against Neon without explicit approval.
+- Production database status: reported migrated to `fc35b4ffa9c0` on 2026-11-16; not independently verified in this session. The historical details above describe the pre-migration state.
 
 ## 9. Features Still to Implement
 
 ### Email and account settings
 
-- Implemented: required email column, two-step signup with email OTP verification, login by email, and the `/account` settings page (Stage 3, migrations `6694a1a15bcb` and `fc35b4ffa9c0`).
-- Remaining: apply the migrations to production after a verified backup and reset (see section 8 and `docs/STAGE2_DATABASE_PLAN.md`).
+- Implemented: required email column, two-step signup with email OTP verification, login by email, the `/account` settings page (Stage 3, migrations `6694a1a15bcb` and `fc35b4ffa9c0`), and signup with email/password only plus a generated internal username.
+- The production migration is reported complete (`fc35b4ffa9c0`); it was not independently verified in this session (see section 8).
 
 ### Photo uploads through Cloudinary
 
@@ -415,9 +425,9 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 ### Database and migration work
 
 - Flask-Migrate is now wired and `migrations/` is scaffolded with baseline revision `897fe5622bb6`.
-- Email migration `6694a1a15bcb` (adds `users.email` + unique index `ix_users_email`) and email-verification migration `fc35b4ffa9c0` (adds `email_verifications`, `users.email_verified`, and `NOT NULL` on `users.email`) are implemented and validated locally but not applied.
+- Email migration `6694a1a15bcb` (adds `users.email` + unique index `ix_users_email`) and email-verification migration `fc35b4ffa9c0` (adds `email_verifications`, `users.email_verified`, and `NOT NULL` on `users.email`) are implemented and validated locally. The user reports both applied to production (`fc35b4ffa9c0`); this was not independently verified in this session.
 - `db.create_all()` at import was removed; schema is owned by migrations. Local setup now requires `flask --app app db upgrade`.
-- Because production data is disposable (approved), the agreed path is to reset Neon and run the full chain rather than stamp the legacy schema (see section 12).
+- The production reset plan in section 12 is retained as historical context. The existing database schema is unchanged by the signup simplification.
 - Back up Neon before any migration.
 - Test migrations on a disposable database and show SQL before applying to Neon.
 
@@ -441,20 +451,22 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 
 ## 11. Exact Next Steps
 
-1. Stage 3 FIX is committed and pushed (`3f719d7`, `master` == `origin/master`). No working-tree changes remain.
+1. Review and commit the uncommitted signup simplification (`routes.py`, `templates/signup.html`, `templates/account.html`, the affected tests, and this document), then push.
 2. Vercel environment variables are configured: `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `RESEND_ENABLED=true`, and `OTP_SECRET` (see section 12). Confirm `RESEND_ENABLED` is exactly `true`/`1`/`yes`.
 3. Verify a Resend sending domain for production; `onboarding@resend.dev` is testing-only (see section 12).
 4. A Neon backup exists at `C:\Users\hp\Desktop\memoryvault_backup.dump`; verify it by restoring into a separate disposable PostgreSQL database, not just `pg_restore --list` (see section 12).
-5. Review the production reset/deployment plan in section 12 and grant explicit approval before running anything against Neon.
-6. After the reset migration, verify production signup (two-step OTP) and login over HTTPS.
+5. The production reset/migration is reported complete (`fc35b4ffa9c0`); keep section 12 as historical context.
+6. Verify production signup (two-step OTP) and login over HTTPS.
 7. Verify the 6-digit code email arrives from the verified sender domain.
 8. Confirm auth responses send `Referrer-Policy: same-origin` and that session cookies are present.
 9. Confirm Vercel has `RATELIMIT_STORAGE_URI` set to the Upstash Redis TLS URL, then redeploy if it changed.
 10. Confirm `SECRET_KEY` and `OTP_SECRET` are stable across Vercel deployments and instances.
 
-## 12. Production Reset and Deployment Plan (awaiting separate approval)
+## 12. Production Reset and Deployment Plan (historical; reported completed 2026-11-16)
 
-The existing Neon data is disposable (approved). The plan is to verify the existing backup by restoring it into a separate disposable PostgreSQL database, then drop ONLY the four application objects and rebuild the schema from scratch with the full migration chain. The Stage 3 FIX code is already pushed (`3f719d7`), so the reset + migration are the only remaining production actions.
+> This runbook is retained as historical context. The user reports that the production Neon migration completed with Alembic head `fc35b4ffa9c0`; it was not independently verified in this session.
+
+The existing Neon data is disposable (approved). The plan is to verify the existing backup by restoring it into a separate disposable PostgreSQL database, then drop ONLY the four application objects and rebuild the schema from scratch with the full migration chain. The Stage 3 FIX code is already pushed (`3f719d7`).
 
 > Prerequisite: `psql`, `pg_dump`, `pg_restore`, and `createdb` must be installed and on `PATH`. They are not present on the current Windows machine, so run these steps from an environment that has the PostgreSQL client tools.
 
