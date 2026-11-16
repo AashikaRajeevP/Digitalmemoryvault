@@ -5,14 +5,49 @@
 <h1> ECHOES OF LIFE </h1>
 Preserving memories, securing moments forever!!
 
-<form method="POST" action="{{url_for('create_memory')}}">
+<form id="memory-form" method="POST" action="{{ url_for('create_memory') }}"
+      data-signature-url="{{ url_for('photo_upload_signature') }}"
+      data-max-photos="{{ max_photos }}"
+      data-max-photo-bytes="{{ max_photo_bytes }}"
+      data-uploads-enabled="{{ 'true' if photo_uploads_enabled else 'false' }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <input type="text" name="title" placeholder="Memory title" maxlength="200" required><br><br>
-    <textarea name="message" placeholder="Write your memory here" maxlength="20000" required></textarea><br><br>
-    <label>Open Date:</label>
-    <input type="date" name="open_date" required><br><br>
-    <input type="submit" value="Create Memory">
+    <input type="hidden" name="photos" id="photos-json" value="">
+
+    <label for="memory-title">Title</label><br>
+    <input id="memory-title" type="text" name="title" placeholder="Memory title" maxlength="200" required><br><br>
+
+    <label for="memory-message">Memory</label><br>
+    <textarea id="memory-message" name="message" placeholder="Write your memory here" maxlength="20000" required></textarea><br><br>
+
+    <label for="memory-open-date">Open Date</label><br>
+    <input id="memory-open-date" type="date" name="open_date" required><br><br>
+
+    <section class="photo-uploader" aria-labelledby="photos-heading">
+        <h2 id="photos-heading">Photos <span class="optional">(optional)</span></h2>
+
+        {% if photo_uploads_enabled %}
+            <p class="hint">
+                Add up to {{ max_photos }} photos ({{ max_photo_mb }} MB each, JPG, PNG, WebP, or GIF).
+                Choose one photo as the cover. Additional photos stay hidden until the memory unlocks.
+            </p>
+            <label for="photo-input" class="photo-picker">Add photos</label>
+            <input id="photo-input" class="visually-hidden" type="file"
+                   accept="image/jpeg,image/png,image/webp,image/gif" multiple>
+            <p id="upload-status" class="upload-status" role="status" aria-live="polite"></p>
+            <div id="photo-previews" class="photo-previews"></div>
+        {% else %}
+            <p class="notice">
+                Photo uploads are not configured yet. You can still create a memory without photos.
+            </p>
+        {% endif %}
+    </section>
+
+    <button type="submit" id="memory-submit">Create Memory</button>
 </form>
+{% endblock %}
 
-
+{% block scripts %}
+{% if photo_uploads_enabled %}
+<script src="{{ url_for('static', filename='create_memory.js') }}" defer></script>
+{% endif %}
 {% endblock %}

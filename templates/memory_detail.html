@@ -2,15 +2,58 @@
 {% block title %} Memory Details {% endblock %}
 
 {% block content %}
-<h1>Every memory matters—keep it forever!!</h1>
+<p class="eyebrow">Every memory matters—keep it forever!!</p>
 
-<h2>{{memory.title}}</h2>
-<p>Created On - {{memory.created_on}}</p>
-<p>Open Date - {{memory.open_date}}</p>
-<hr>
-{% if today >= memory.open_date %}
-    <p>{{memory.message}}</p>
-{% else %}
-    <p>This memory is still locked.</p>
-{% endif %}
+<article class="memory-detail">
+    <header>
+        <h1>{{ memory.title }}</h1>
+        <p>Created On - {{ memory.created_on }}</p>
+        <p>Open Date - {{ memory.open_date }}</p>
+        {% if is_locked %}
+            <p class="badge badge-locked">Locked</p>
+        {% else %}
+            <p class="badge badge-unlocked">Unlocked</p>
+        {% endif %}
+    </header>
+
+    {% if cover %}
+        <figure class="memory-cover">
+            <a href="{{ cover.secure_url }}" target="_blank" rel="noopener noreferrer"
+               title="View cover photo larger">
+                <img src="{{ cover.secure_url }}"
+                     alt="Cover photo for {{ memory.title }}" loading="lazy">
+            </a>
+            <figcaption>Cover photo</figcaption>
+        </figure>
+    {% endif %}
+
+    {% if is_locked %}
+        <p class="locked-message">This memory is still locked.</p>
+        <p>Opens in {{ (memory.open_date - today).days }} days.</p>
+    {% else %}
+        <div class="memory-message">{{ memory.message }}</div>
+
+        {% if photos %}
+            <h2>Photo gallery</h2>
+            <div class="photo-gallery">
+                {% for photo in photos %}
+                    <a class="photo-gallery-item" href="{{ photo.secure_url }}"
+                       target="_blank" rel="noopener noreferrer"
+                       title="View photo {{ loop.index }} larger">
+                        <img src="{{ photo.secure_url }}"
+                             alt="Photo {{ loop.index }} from {{ memory.title }}"
+                             loading="lazy">
+                    </a>
+                {% endfor %}
+            </div>
+        {% endif %}
+    {% endif %}
+</article>
+
+<form method="POST" action="{{ url_for('delete_memory', mid=memory.mid) }}" class="danger-zone">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="danger-button">Delete memory</button>
+</form>
+
+<p><a href="{{ url_for('my_memories') }}">Back to my memories</a></p>
 {% endblock %}

@@ -2,10 +2,11 @@ import secrets
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 
-from flask import flash, redirect, render_template, request, session, url_for
-from sqlalchemy.exc import IntegrityError
+from flask import flash, jsonify, redirect, render_template, request, session, url_for
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from app import Memory, PasswordReset, User, app, db, limiter
+from app import Memory, MemoryPhoto, PasswordReset, User, app, db, limiter
+from services import photos as photo_service
 from services.accounts import is_valid_email, normalize_email
 from services.email import send_otp_email
 from services.otp import generate_otp, hash_otp, hash_token, verify_otp
@@ -388,30 +389,104 @@ def logout():
     return redirect(url_for('login'))
 
 
+def _cleanup_uploads(raw_photos, user_id):
+    """Best-effort delete of just-uploaded assets that are not already in use."""
+    public_ids = photo_service.extract_user_public_ids(raw_photos, user_id)
+    if not public_ids:
+        return
+
+    in_use = {
+        row[0]
+        for row in MemoryPhoto.query.with_entities(MemoryPhoto.public_id)
+        .filter(MemoryPhoto.public_id.in_(public_ids))
+        .all()
+    }
+    photo_service.destroy_photos(
+        [public_id for public_id in public_ids if public_id not in in_use]
+    )
+
+
+def _render_create_memory():
+    return render_template(
+        'create_memory.html',
+        max_photos=app.config['MAX_PHOTOS_PER_MEMORY'],
+        max_photo_bytes=app.config['MAX_PHOTO_BYTES'],
+        max_photo_mb=max(1, app.config['MAX_PHOTO_BYTES'] // (1024 * 1024)),
+        photo_uploads_enabled=photo_service.is_configured(),
+    )
+
+
+@app.route('/photos/signature', methods=['POST'])
+@login_required
+@limiter.limit("120 per hour")
+def photo_upload_signature():
+    try:
+        return jsonify(photo_service.build_upload_signature(session['user_id']))
+    except photo_service.PhotoUploadsNotConfigured:
+        return jsonify(error="Photo uploads are not configured."), 503
+
+
 @app.route('/create_memory', methods=['GET', 'POST'])
 @login_required
 @limiter.limit("60 per hour")
 def create_memory():
     if request.method == 'GET':
-        return render_template('create_memory.html')
+        return _render_create_memory()
 
     title = request.form.get('title', '').strip()
     message = request.form.get('message', '').strip()
     open_date_raw = request.form.get('open_date', '').strip()
+    raw_photos = request.form.get('photos', '')
 
     if not title or len(title) > 200:
         flash("Title is required and must be at most 200 characters.", "error")
-        return render_template('create_memory.html'), 400
+        return _render_create_memory(), 400
 
     if not message or len(message) > 20000:
         flash("Memory text is required and must be at most 20000 characters.", "error")
-        return render_template('create_memory.html'), 400
+        return _render_create_memory(), 400
 
     try:
         open_date = date.fromisoformat(open_date_raw)
     except ValueError:
         flash("Please choose a valid open date.", "error")
-        return render_template('create_memory.html'), 400
+        return _render_create_memory(), 400
+
+    uploaded_photos = []
+    if str(raw_photos).strip():
+        if not photo_service.is_configured():
+            flash(
+                "Photo uploads are not configured yet. "
+                "You can still create a memory without photos.",
+                "error",
+            )
+            return _render_create_memory(), 400
+
+        try:
+            uploaded_photos = photo_service.normalize_photos(
+                raw_photos,
+                session['user_id'],
+                app.config['MAX_PHOTOS_PER_MEMORY'],
+                app.config['MAX_PHOTO_BYTES'],
+            )
+        except photo_service.PhotoValidationError as error:
+            _cleanup_uploads(raw_photos, session['user_id'])
+            flash(str(error), "error")
+            return _render_create_memory(), 400
+
+        existing_photo = MemoryPhoto.query.filter(
+            MemoryPhoto.public_id.in_(
+                [photo["public_id"] for photo in uploaded_photos]
+            )
+        ).first()
+        if existing_photo is not None:
+            _cleanup_uploads(raw_photos, session['user_id'])
+            flash(
+                "One or more photos are already attached to a memory. "
+                "Please re-upload them.",
+                "error",
+            )
+            return _render_create_memory(), 400
 
     memory = Memory(
         title=title,
@@ -421,8 +496,31 @@ def create_memory():
         user_id=session['user_id'],
     )
 
-    db.session.add(memory)
-    db.session.commit()
+    try:
+        db.session.add(memory)
+        db.session.flush()
+
+        for photo in uploaded_photos:
+            db.session.add(
+                MemoryPhoto(
+                    memory_id=memory.mid,
+                    public_id=photo["public_id"],
+                    secure_url=photo["secure_url"],
+                    is_cover=photo["is_cover"],
+                    position=photo["position"],
+                    width=photo["width"],
+                    height=photo["height"],
+                    image_format=photo["image_format"],
+                    bytes=photo["bytes"],
+                )
+            )
+
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        _cleanup_uploads(raw_photos, session['user_id'])
+        flash("We could not save the memory. Please try again.", "error")
+        return _render_create_memory(), 500
 
     flash("Memory created.", "success")
     return redirect(url_for('my_memories'))
@@ -444,4 +542,52 @@ def memory_detail(mid):
         user_id=session['user_id'],
     ).first_or_404()
 
-    return render_template('memory_detail.html', memory=memory, today=date.today())
+    today = date.today()
+    is_locked = memory.open_date > today
+
+    if is_locked:
+        cover = (
+            MemoryPhoto.query.filter_by(memory_id=memory.mid, is_cover=True)
+            .order_by(MemoryPhoto.position)
+            .first()
+        )
+        photos = []
+    else:
+        all_photos = (
+            MemoryPhoto.query.filter_by(memory_id=memory.mid)
+            .order_by(MemoryPhoto.position)
+            .all()
+        )
+        cover = next(
+            (photo for photo in all_photos if photo.is_cover),
+            all_photos[0] if all_photos else None,
+        )
+        photos = [photo for photo in all_photos if photo is not cover]
+
+    return render_template(
+        'memory_detail.html',
+        memory=memory,
+        today=today,
+        is_locked=is_locked,
+        cover=cover,
+        photos=photos,
+    )
+
+
+@app.route('/memory_detail/<int:mid>/delete', methods=['POST'])
+@login_required
+def delete_memory(mid):
+    memory = Memory.query.filter_by(
+        mid=mid,
+        user_id=session['user_id'],
+    ).first_or_404()
+
+    public_ids = [photo.public_id for photo in memory.photos]
+
+    db.session.delete(memory)
+    db.session.commit()
+
+    photo_service.destroy_photos(public_ids)
+
+    flash("Memory deleted.", "success")
+    return redirect(url_for('my_memories'))

@@ -6,7 +6,7 @@ Last updated: 2026-11-16
 - Branch: `master`
 - HEAD: `d9ec607 Simplify signup to email and password only`
 - Remote status: local `HEAD` is ahead of `origin/master` (`112a1b2`).
-- Working tree at inspection: signup is email/password only with immediate account creation, and a Forgot Password flow using email OTP is implemented. Modified/added: `app.py`, `routes.py`, `services/otp.py`, `templates/login.html`, `templates/forgot_password.html`, `templates/reset_password.html`, `migrations/versions/7c1a9e4b2f60_password_reset.py`, `tests/test_accounts.py`, `tests/test_security.py`, `tests/test_password_reset.py`, and this document. Removed: `templates/verify.html`, `tests/test_signup_verification.py`, and `templates/account.html` (Account Settings feature removed). New migration `7c1a9e4b2f60` is validated locally but **not applied to Neon**. Not committed, not pushed, not deployed.
+- Working tree at inspection: signup is email/password only with immediate account creation, a Forgot Password flow using email OTP is implemented, and the Photo Attachments feature is implemented end-to-end. Modified/added: `app.py`, `routes.py`, `services/photos.py`, `services/otp.py`, `static/create_memory.js`, `static/styles.css`, `templates/base.html`, `templates/create_memory.html`, `templates/memory_detail.html`, `templates/my_memories.html`, `migrations/versions/7c1a9e4b2f60_password_reset.py`, `migrations/versions/a3f9c1d7e2b4_memory_photos.py`, `tests/conftest.py`, `tests/test_accounts.py`, `tests/test_security.py`, `tests/test_password_reset.py`, `tests/test_photos.py`, `.env.example`, and this document. New migrations `7c1a9e4b2f60` and `a3f9c1d7e2b4` are validated locally but **not applied to Neon**. Not committed, not pushed, not deployed.
 
 ## Status Legend
 
@@ -31,7 +31,8 @@ The long-term goal is to extend the vault with photo attachments, voice memories
 - Flask-SQLAlchemy 3.1.1 / SQLAlchemy
 - PostgreSQL via Neon in production
 - SQLite locally when `DATABASE_URL` is blank
-- Flask-Migrate 4.1.0 is wired in `app.py`; `migrations/` holds baseline `897fe5622bb6`, email revision `6694a1a15bcb`, email-verification revision `fc35b4ffa9c0`, and password-reset/auth-version revision `7c1a9e4b2f60`
+- Flask-Migrate 4.1.0 is wired in `app.py`; `migrations/` holds baseline `897fe5622bb6`, email revision `6694a1a15bcb`, email-verification revision `fc35b4ffa9c0`, password-reset/auth-version revision `7c1a9e4b2f60`, and memory-photos revision `a3f9c1d7e2b4` (head)
+- Cloudinary direct browser uploads via HMAC-SHA1 signatures (no binary uploads through server)
 - Flask-WTF 1.3.0 for CSRF
 - Flask-Limiter 4.1.1 with Redis support
 - redis-py 8.1.0
@@ -44,14 +45,16 @@ The long-term goal is to extend the vault with photo attachments, voice memories
 
 ### Current architecture
 
-- `app.py` creates the Flask app, loads configuration, initializes extensions (including Flask-Migrate), defines the `User`, `EmailVerification` (legacy, unused), `PasswordReset`, and `Memory` models inline, and imports `routes.py`. Schema is created by migrations, not at import.
-- `routes.py` contains all routes, auth helpers, validation, rate limits, and ownership checks.
+- `app.py` creates the Flask app, loads configuration, initializes extensions (including Flask-Migrate), defines the `User`, `EmailVerification` (legacy, unused), `PasswordReset`, `Memory`, and `MemoryPhoto` models inline, and imports `routes.py`. Schema is created by migrations, not at import.
+- `routes.py` contains all routes, auth helpers, validation, rate limits, ownership checks, and photo management endpoints.
+- `services/photos.py` contains Cloudinary signing, photo payload validation, user folder scoping, and asset deletion helpers.
 - `services/security.py` contains password hash detection, hashing, and verification helpers.
 - `services/accounts.py` contains email normalization and validation helpers.
 - `services/otp.py` contains OTP generation and HMAC-SHA256 hashing/verification helpers.
 - `services/email.py` contains the Resend OTP email sender (lazy import; no-op when delivery is disabled or under test).
+- `static/` contains `create_memory.js` (client-side image selection, previewing, progress tracking, and direct Cloudinary uploads) and `styles.css` (responsive layout, memory cards, photo previews, badges, and responsive photo gallery).
 - `templates/` contains Jinja templates: home, login, signup, forgot password, reset password, create memory, my memories, memory detail, error, and base layout.
-- `tests/` contains pytest configuration and security/behavior tests using a temporary SQLite database.
+- `tests/` contains pytest configuration and security/behavior tests using a temporary SQLite database (`test_photos.py` covers Cloudinary signing, photo validation, access control, locked/unlocked views, and deletions).
 - `scripts/hash_existing_passwords.py` is a guarded dry-run/apply utility for converting legacy plaintext passwords to hashes.
 - `migrate_to_postgres.py` is a SQLite-to-PostgreSQL copy utility. It is not part of the normal app runtime.
 - `models.py` is currently commented out; models live in `app.py`.
@@ -77,24 +80,30 @@ Implemented and locally tested:
 - Required email on user accounts with format validation, normalization, and uniqueness.
 - Legacy plaintext password compatibility: a successful login automatically upgrades the stored plaintext password to a Werkzeug hash.
 - User logout using a POST-only route.
-- Create a memory with title, message, and open date.
-- List the current user's memories.
-- View a memory detail page.
-- Date-based locking: locked memories hide their message until the open date.
+- Create a memory with title, message, open date, and optional photo attachments (one cover photo and multiple additional photos).
+- Photo attachments with direct browser-to-Cloudinary signed uploads: credentials stay secure on the server, image binaries never traverse the Flask app, and assets are isolated in per-user Cloudinary folders (`memoryvault/users/<user_id>/...`).
+- Cover photo support: one photo designated as the cover photo; displayed prominently on memory cards and detail pages even while the memory is locked.
+- Additional photos privacy: additional photos and their metadata are strictly withheld by the backend while the memory is locked (`photos = []`). Once unlocked, additional photos are displayed in a responsive grid gallery with full-resolution viewing.
+- Client-side upload UX: file type and size validation, instant client previews, radio button cover photo selector, remove buttons, upload progress indicators, submit button lock during uploads, and error notifications.
+- Memory & photo cleanup: deleting a memory cascades to delete `MemoryPhoto` database records and automatically destroys associated Cloudinary assets via Cloudinary's Destroy API; failed creation or DB errors clean up in-flight user uploads to prevent orphaned assets.
+- Graceful degradation: if Cloudinary is unconfigured, users can still create and manage text-only memories cleanly with informational feedback.
+- List the current user's memories with cover photo thumbnails.
+- View a memory detail page with cover photo, countdown if locked, and message/photo gallery if unlocked.
+- Date-based locking: locked memories hide their message and additional photos until the open date.
 - Locked-memory countdown in the memory list.
 - Home dashboard with total, locked, and unlocked counts.
 - Per-user memory ownership checks.
-- Input validation for emails, passwords, titles, messages, and open dates.
+- Input validation for emails, passwords, titles, messages, open dates, photo formats, photo sizes, and photo counts.
 - Flash messages and a shared error page.
-- Security headers and CSRF protection.
-- Rate limiting for signup, login, and memory creation.
+- Security headers (including Cloudinary in CSP `img-src`, `connect-src`, and `media-src`) and CSRF protection.
+- Rate limiting for signup, login, memory creation, and upload signature requests (120/hr).
 - Password conversion utility exists but has not been run against Neon.
 
 Not yet implemented:
 
-- Photo or audio attachments.
+- Audio / voice attachments.
 - Frontend redesign and GSAP animations.
-- Applying schema migrations to production Neon.
+- Applying schema migrations (`7c1a9e4b2f60` and `a3f9c1d7e2b4`) to production Neon.
 
 ## 4. Stage 1 Security Changes
 
@@ -573,6 +582,110 @@ yet been run against PostgreSQL or Neon.
 - `onboarding@resend.dev` is a shared testing sender that Resend only delivers to the account owner's own email address. It cannot send to arbitrary users.
 - Production requires a domain verified in Resend: add the domain, publish the required DNS records (SPF/DKIM, and DMARC as recommended), wait for verification, then set `RESEND_FROM_EMAIL` to an address on that verified domain (for example `no-reply@yourdomain.com`).
 - Until the domain is verified, `POST /forgot_password` will not deliver reset codes to real users.
+
+## 13. Photo Attachments Feature and Cloudinary Setup
+
+### Architecture Overview
+
+The Photo Attachments feature allows users to attach multiple photos to any memory, designating one photo as the primary cover photo.
+
+Key architectural decisions:
+1. **Direct Browser-to-Cloudinary Uploads**:
+   - The Flask server NEVER receives, buffers, or stores raw image binaries.
+   - When a user selects photos on the creation form, the client requests a short-lived signed upload payload from `POST /photos/signature`.
+   - The server validates authentication (`@login_required`), enforces rate limits (120/hr), and signs valid Cloudinary upload parameters (`folder`, `timestamp`, `allowed_formats`) using `CLOUDINARY_API_SECRET` via SHA-1 HMAC. File size limits (`MAX_PHOTO_BYTES`) are enforced client-side in JavaScript before upload and strictly verified server-side in `normalize_photos`.
+   - The browser uploads directly to Cloudinary's REST endpoint (`https://api.cloudinary.com/v1_1/<cloud_name>/image/upload`) using XMLHttpRequest, tracking individual file upload percentages with a native `<progress>` bar and reporting genuine Cloudinary API errors if encountered.
+   - `CLOUDINARY_API_SECRET` is never sent to or visible in client-side code.
+2. **Database Representation (`MemoryPhoto`)**:
+   - Stores only `public_id`, `secure_url`, `is_cover`, `position`, `width`, `height`, `image_format`, and `bytes`.
+   - Linked to `memories.mid` via foreign key with `ondelete='CASCADE'`.
+   - `Memory.photos` uses `cascade='all, delete-orphan'` and is ordered by `position`.
+   - Unique constraint on `public_id` prevents reusing the same asset across multiple memories or submissions.
+3. **Cover Photo vs. Additional Photos**:
+   - Each memory with photos has exactly one cover photo (`is_cover=True`).
+   - If the user doesn't pick one explicitly, the first uploaded photo is automatically designated as cover.
+   - **Cover Photo Visibility**: Visible on memory cards in `my_memories.html` and on `memory_detail.html` even when the memory is still locked.
+   - **Additional Photos Privacy**: Strictly locked. On `memory_detail/<mid>`, if the memory is locked (`memory.open_date > today`), the backend queries ONLY the cover photo and sets `photos = []`. No additional photo URLs, IDs, or metadata are passed to Jinja or sent over the wire. Once unlocked, all additional photos render in an attractive responsive gallery with full-resolution links.
+4. **Security & Ownership Validation**:
+   - Uploads are scoped strictly to `memoryvault/users/<user_id>/...`.
+   - Backend validation in `services/photos.py` (`normalize_photos`) ensures submitted `public_id`s begin with the authenticated user's exact folder prefix, prevents directory traversal, checks URL domain (`res.cloudinary.com`) and path, validates formats (`jpg`, `jpeg`, `png`, `webp`, `gif`), and enforces size and count limits.
+   - Users cannot attach, view, or delete photos belonging to another user.
+   - CSP headers permit `https://res.cloudinary.com` in `img-src` / `media-src` and `https://api.cloudinary.com` in `connect-src`.
+5. **Asset Cleanup & Deletion**:
+   - Deleting a memory via `POST /memory_detail/<mid>/delete` deletes the memory record and automatically triggers Cloudinary's Destroy API (`services/photos.py:destroy_photos`) to clean up all associated assets.
+   - If memory creation fails during validation or database commit, an automatic cleanup routine (`_cleanup_uploads`) destroys any freshly uploaded assets in that user's folder that are not already bound to a database record, preventing orphaned Cloudinary assets.
+6. **Graceful Degradation**:
+   - If Cloudinary credentials are not configured, the create memory page notifies the user with a friendly notice, and memory creation works normally without photo attachments. The signature endpoint returns HTTP 503.
+
+### Cloudinary Configuration & Environment Variables
+
+Add the following to `.env` locally or in Vercel environment variables:
+
+```bash
+# Cloudinary Credentials (from Cloudinary Dashboard -> API Keys)
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_api_key
+CLOUDINARY_API_SECRET=your_api_secret
+
+# Optional Configuration (defaults applied if omitted)
+CLOUDINARY_UPLOAD_FOLDER=memoryvault
+MAX_PHOTOS_PER_MEMORY=10
+MAX_PHOTO_BYTES=10485760
+```
+
+### Cloudinary Setup Instructions
+
+1. Create a free account at [Cloudinary](https://cloudinary.com/).
+2. Navigate to the **Dashboard** / **Settings -> Access Keys**.
+3. Copy **Cloud Name**, **API Key**, and **API Secret**.
+4. In your local `.env`, set:
+   ```env
+   CLOUDINARY_CLOUD_NAME=your_cloud_name
+   CLOUDINARY_API_KEY=your_api_key
+   CLOUDINARY_API_SECRET=your_api_secret
+   ```
+5. Ensure your Cloudinary security settings allow signed uploads to the specified upload folder (signed uploads are enabled by default on all standard Cloudinary accounts).
+
+### Migration Details
+
+- Revision ID: `a3f9c1d7e2b4`
+- Revises: `7c1a9e4b2f60`
+- File: `migrations/versions/a3f9c1d7e2b4_memory_photos.py`
+- Creates table `memory_photos` with foreign key cascade to `memories.mid`, unique constraint on `public_id`, index on `memory_id`, and batch-alter table support for SQLite compatibility.
+- Full migration chain:
+  `897fe5622bb6` -> `6694a1a15bcb` -> `fc35b4ffa9c0` -> `7c1a9e4b2f60` -> `a3f9c1d7e2b4` (head)
+- Fully validated locally with SQLite: `upgrade()`, `check()` (clean schema with zero drift), `downgrade(revision='7c1a9e4b2f60')`, and re-`upgrade()` all passed.
+- **NEVER applied to Neon** in this session per instructions. When deploying to production after backing up Neon:
+  ```powershell
+  $env:DATABASE_URL = $env:PRODUCTION_DATABASE_URL
+  $env:SECRET_KEY = $env:PRODUCTION_SECRET_KEY
+  flask --app app db upgrade
+  ```
+
+### Automated Testing
+
+- Test suite: `tests/test_photos.py` (22 photo-specific tests, 81 tests total across the project).
+- Cloudinary interactions (`destroy_photo`) are mocked using pytest fixtures to guarantee offline and deterministic test execution.
+- Tests cover:
+  - Signature generation requires authentication and CSRF.
+  - Signature returns HTTP 503 when Cloudinary credentials are missing.
+  - Signature generation contains expected parameters and excludes `api_secret`.
+  - Creating memory with photos and designated cover photo.
+  - Fallback to first photo as cover when none selected.
+  - Creating memory without photos still succeeds.
+  - Enforcement of photo count limit (`MAX_PHOTOS_PER_MEMORY`).
+  - Rejection of invalid file formats and oversized images.
+  - Rejection of untrusted or spoofed Cloudinary URLs.
+  - Rejection of photos belonging to another user's folder (`memoryvault/users/<other_user_id>`).
+  - Rejection of duplicate photo payloads or photos already attached to an existing memory.
+  - Rollback and cleanup of uploaded assets if database commit fails.
+  - Locked memory detail strictly omits additional photos and hidden metadata from response.
+  - Unlocked memory detail shows cover photo and responsive additional photo gallery.
+  - Memory cards display cover photo and omit additional photo metadata.
+  - Unauthorized users cannot view another user's memory or photos.
+  - Deleting a memory cascades deletion to database photos and triggers Cloudinary asset destruction.
+  - Unauthorized users cannot delete another user's memory.
+  - Deletion requires valid CSRF token.
 
 ## Useful Local Commands
 

@@ -62,6 +62,15 @@ app.config.update(
     RESEND_API_KEY=os.getenv("RESEND_API_KEY", "").strip(),
     RESEND_FROM_EMAIL=os.getenv("RESEND_FROM_EMAIL", "").strip() or "onboarding@resend.dev",
     RESEND_ENABLED=os.getenv("RESEND_ENABLED", "").strip().lower() in ("1", "true", "yes"),
+    CLOUDINARY_CLOUD_NAME=os.getenv("CLOUDINARY_CLOUD_NAME", "").strip(),
+    CLOUDINARY_API_KEY=os.getenv("CLOUDINARY_API_KEY", "").strip(),
+    CLOUDINARY_API_SECRET=os.getenv("CLOUDINARY_API_SECRET", "").strip(),
+    CLOUDINARY_UPLOAD_FOLDER=(
+        os.getenv("CLOUDINARY_UPLOAD_FOLDER", "memoryvault").strip().strip("/")
+        or "memoryvault"
+    ),
+    MAX_PHOTOS_PER_MEMORY=_env_int("MAX_PHOTOS_PER_MEMORY", 10, 1),
+    MAX_PHOTO_BYTES=_env_int("MAX_PHOTO_BYTES", 10 * 1024 * 1024, 1024),
 )
 
 csrf = CSRFProtect(app)
@@ -259,8 +268,51 @@ class Memory(db.Model):
     created_on = db.Column(db.Date,nullable=False)
     user_id= db.Column(db.Integer,db.ForeignKey('users.uid'),nullable=False)
 
+    photos = db.relationship(
+        'MemoryPhoto',
+        back_populates='memory',
+        cascade='all, delete-orphan',
+        order_by='MemoryPhoto.position',
+        lazy='selectin',
+    )
+
+    @property
+    def cover_photo(self):
+        for photo in self.photos:
+            if photo.is_cover:
+                return photo
+        return self.photos[0] if self.photos else None
+
     def __repr__(self):
         return f'<Memory: {self.title}>'
+
+
+class MemoryPhoto(db.Model):
+    __tablename__ = 'memory_photos'
+    __table_args__ = (
+        db.UniqueConstraint('public_id', name='uq_memory_photos_public_id'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    memory_id = db.Column(
+        db.Integer,
+        db.ForeignKey('memories.mid', ondelete='CASCADE'),
+        nullable=False,
+        index=True,
+    )
+    public_id = db.Column(db.String, nullable=False)
+    secure_url = db.Column(db.String, nullable=False)
+    is_cover = db.Column(db.Boolean, nullable=False, default=False)
+    position = db.Column(db.Integer, nullable=False, default=0)
+    width = db.Column(db.Integer, nullable=True)
+    height = db.Column(db.Integer, nullable=True)
+    image_format = db.Column(db.String, nullable=True)
+    bytes = db.Column(db.Integer, nullable=True)
+
+    memory = db.relationship('Memory', back_populates='photos')
+
+    def __repr__(self):
+        return f'<MemoryPhoto: {self.id}>'
 
 
 from routes import *

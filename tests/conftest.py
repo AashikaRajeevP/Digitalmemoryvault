@@ -15,6 +15,14 @@ os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DIR.joinpath('test.db').as_posix(
 os.environ["RATELIMIT_STORAGE_URI"] = "memory://"
 os.environ.pop("VERCEL", None)
 
+# Keep photo tests deterministic and offline regardless of local .env values.
+os.environ["CLOUDINARY_CLOUD_NAME"] = ""
+os.environ["CLOUDINARY_API_KEY"] = ""
+os.environ["CLOUDINARY_API_SECRET"] = ""
+os.environ["CLOUDINARY_UPLOAD_FOLDER"] = "memoryvault"
+os.environ["MAX_PHOTOS_PER_MEMORY"] = "10"
+os.environ["MAX_PHOTO_BYTES"] = str(10 * 1024 * 1024)
+
 
 @pytest.fixture(scope="session")
 def app_module():
