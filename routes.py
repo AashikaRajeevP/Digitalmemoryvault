@@ -5,10 +5,10 @@ from functools import wraps
 from flask import flash, redirect, render_template, request, session, url_for
 from sqlalchemy.exc import IntegrityError
 
-from app import EmailVerification, Memory, User, app, db, limiter
+from app import Memory, PasswordReset, User, app, db, limiter
 from services.accounts import is_valid_email, normalize_email
 from services.email import send_otp_email
-from services.otp import generate_otp, hash_otp, verify_otp
+from services.otp import generate_otp, hash_otp, hash_token, verify_otp
 from services.security import (
     DUMMY_PASSWORD_HASH,
     hash_password,
@@ -21,10 +21,10 @@ def _utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _purge_expired_verifications():
+def _purge_expired_resets():
     now = _utcnow()
-    EmailVerification.query.filter(
-        (EmailVerification.used.is_(True)) | (EmailVerification.expires_at <= now)
+    PasswordReset.query.filter(
+        (PasswordReset.used.is_(True)) | (PasswordReset.expires_at <= now)
     ).delete(synchronize_session=False)
     db.session.commit()
 
@@ -52,35 +52,23 @@ def _generate_internal_username(email):
     return candidate
 
 
-def _create_verified_user(challenge):
-    """Create a verified user for the challenge, retrying username collisions.
+def _create_user(email, password_hash):
+    """Create a new user immediately, retrying internal username collisions.
 
     Returns (user, error). error is None on success, "email_taken" when the
-    email was registered in the meantime, "challenge_missing" when the pending
-    challenge disappeared, or "failed" after repeated database conflicts.
+    email was registered in the meantime, or "failed" after repeated database
+    conflicts.
     """
-    challenge_id = challenge.id
-
     for _ in range(MAX_USERNAME_GENERATION_ATTEMPTS):
-        challenge = db.session.get(EmailVerification, challenge_id)
-
-        if challenge is None or challenge.used:
-            return None, "challenge_missing"
-
-        if User.query.filter_by(email=challenge.email).first() is not None:
-            challenge.used = True
-            db.session.commit()
+        if User.query.filter_by(email=email).first() is not None:
             return None, "email_taken"
 
-        username = _generate_internal_username(challenge.email)
         user = User(
-            username=username,
-            email=challenge.email,
-            password=challenge.password_hash,
-            email_verified=True,
+            username=_generate_internal_username(email),
+            email=email,
+            password=password_hash,
+            email_verified=False,
         )
-        challenge.username = username
-        challenge.used = True
         db.session.add(user)
 
         try:
@@ -96,7 +84,8 @@ def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
         user_id = session.get("user_id")
-        if user_id is None or db.session.get(User, user_id) is None:
+        user = db.session.get(User, user_id) if user_id is not None else None
+        if user is None or session.get("auth_version") != (user.auth_version or 1):
             session.clear()
             flash("Please log in to continue.", "error")
             return redirect(url_for("login"))
@@ -148,26 +137,66 @@ def signup():
         flash("Please enter a valid email address.", "error")
         return render_template('signup.html'), 400
 
-    _purge_expired_verifications()
-
     if User.query.filter_by(email=email).first() is not None:
         flash("That email address is already in use.", "error")
         return render_template('signup.html'), 400
 
-    EmailVerification.query.filter_by(email=email, used=False).update(
+    _user, error = _create_user(email, hash_password(password))
+
+    if error == "email_taken":
+        flash("That email address is already in use.", "error")
+        return render_template('signup.html'), 400
+
+    if error is not None:
+        flash("We could not create your account. Please try again.", "error")
+        return render_template('signup.html'), 500
+
+    flash("Account created. Please log in.", "success")
+    return redirect(url_for('login'))
+
+
+RESET_SESSION_KEY = 'pending_reset_token'
+
+
+def _pending_reset():
+    token = session.get(RESET_SESSION_KEY)
+    if not token:
+        return None, None
+    challenge = PasswordReset.query.filter_by(
+        token_hash=hash_token(app.config['OTP_SECRET'], token),
+        used=False,
+    ).first()
+    return token, challenge
+
+
+@app.route('/forgot_password', methods=['GET', 'POST'])
+@limiter.limit("5 per hour")
+def forgot_password():
+    if request.method == 'GET':
+        return render_template('forgot_password.html')
+
+    email = normalize_email(request.form.get('email', ''))
+
+    if not email or not is_valid_email(email):
+        flash("Please enter a valid email address.", "error")
+        return render_template('forgot_password.html'), 400
+
+    _purge_expired_resets()
+
+    user = User.query.filter_by(email=email).first()
+
+    PasswordReset.query.filter_by(email=email, used=False).update(
         {"used": True}, synchronize_session=False
     )
 
     token = secrets.token_urlsafe(32)
     otp = generate_otp()
     now = _utcnow()
-    username = _generate_internal_username(email)
 
-    challenge = EmailVerification(
-        token=token,
-        username=username,
+    challenge = PasswordReset(
+        user_id=user.uid if user is not None else None,
         email=email,
-        password_hash=hash_password(password),
+        token_hash=hash_token(app.config['OTP_SECRET'], token),
         otp_hash=hash_otp(app.config['OTP_SECRET'], token, otp),
         attempts=0,
         used=False,
@@ -179,114 +208,128 @@ def signup():
     db.session.add(challenge)
     db.session.commit()
 
-    if not send_otp_email(email, otp):
+    session[RESET_SESSION_KEY] = token
+
+    if user is not None and not send_otp_email(email, otp):
         challenge.used = True
         db.session.commit()
-        flash("We could not send the verification email. Please try again.", "error")
-        return render_template('signup.html'), 502
 
-    session['pending_signup_token'] = token
-    flash("Enter the 6-digit code we emailed you.", "success")
-    return redirect(url_for('signup_verify'))
+    flash(
+        "If an account exists for that email, we've sent a password reset code.",
+        "success",
+    )
+    return redirect(url_for('reset_password'))
 
 
-@app.route('/signup/verify', methods=['GET', 'POST'])
+@app.route('/reset_password', methods=['GET', 'POST'])
 @limiter.limit("10 per hour")
-def signup_verify():
-    token = session.get('pending_signup_token')
-
-    if not token:
-        flash("Please start signup again.", "error")
-        return redirect(url_for('signup'))
-
-    challenge = EmailVerification.query.filter_by(token=token).first()
+def reset_password():
+    token, challenge = _pending_reset()
     now = _utcnow()
 
-    if challenge is None:
-        session.pop('pending_signup_token', None)
-        flash("Please start signup again.", "error")
-        return redirect(url_for('signup'))
-
-    if challenge.used or challenge.expires_at <= now:
-        session.pop('pending_signup_token', None)
-        flash("That verification code has expired. Please sign up again.", "error")
-        return redirect(url_for('signup'))
+    if challenge is None or challenge.expires_at <= now:
+        session.pop(RESET_SESSION_KEY, None)
+        if request.method == 'GET':
+            flash("Please request a password reset code.", "error")
+            return redirect(url_for('forgot_password'))
+        flash("That code is invalid or has expired.", "error")
+        return redirect(url_for('forgot_password'))
 
     if request.method == 'GET':
-        return render_template('verify.html', email=challenge.email)
-
-    otp = request.form.get('otp', '').strip()
+        return render_template('reset_password.html', email=challenge.email)
 
     if challenge.attempts >= app.config['OTP_MAX_ATTEMPTS']:
         challenge.used = True
         db.session.commit()
-        session.pop('pending_signup_token', None)
-        flash("Too many incorrect attempts. Please sign up again.", "error")
-        return redirect(url_for('signup'))
+        session.pop(RESET_SESSION_KEY, None)
+        flash("That code is invalid or has expired.", "error")
+        return redirect(url_for('forgot_password'))
+
+    password = request.form.get('password', '')
+    confirm_password = request.form.get('confirm_password', '')
+    min_length = app.config['PASSWORD_MIN_LENGTH']
+    max_length = app.config['PASSWORD_MAX_LENGTH']
+
+    if len(password) < min_length or len(password) > max_length:
+        flash(
+            f"Password must be between {min_length} and {max_length} characters.",
+            "error",
+        )
+        return render_template('reset_password.html', email=challenge.email), 400
+
+    if password != confirm_password:
+        flash("Passwords do not match.", "error")
+        return render_template('reset_password.html', email=challenge.email), 400
+
+    otp = request.form.get('otp', '').strip()
 
     if not (otp.isdigit() and len(otp) == 6) or not verify_otp(
         app.config['OTP_SECRET'], token, otp, challenge.otp_hash
     ):
         challenge.attempts += 1
+
         if challenge.attempts >= app.config['OTP_MAX_ATTEMPTS']:
             challenge.used = True
             db.session.commit()
-            session.pop('pending_signup_token', None)
-            flash("Too many incorrect attempts. Please sign up again.", "error")
-            return redirect(url_for('signup'))
+            session.pop(RESET_SESSION_KEY, None)
+            flash("That code is invalid or has expired.", "error")
+            return redirect(url_for('forgot_password'))
+
         db.session.commit()
-        flash("That code is incorrect.", "error")
-        return render_template('verify.html', email=challenge.email), 400
+        flash("That code is invalid or has expired.", "error")
+        return render_template('reset_password.html', email=challenge.email), 400
 
-    _user, error = _create_verified_user(challenge)
+    user = db.session.get(User, challenge.user_id) if challenge.user_id else None
 
-    if error == "email_taken":
-        session.pop('pending_signup_token', None)
-        flash("That email address is already in use.", "error")
-        return redirect(url_for('login'))
+    if user is None or user.email != challenge.email:
+        challenge.used = True
+        db.session.commit()
+        session.pop(RESET_SESSION_KEY, None)
+        flash("That code is invalid or has expired.", "error")
+        return redirect(url_for('forgot_password'))
 
-    if error == "challenge_missing":
-        session.pop('pending_signup_token', None)
-        flash("Please start signup again.", "error")
-        return redirect(url_for('signup'))
+    consumed = PasswordReset.query.filter_by(
+        id=challenge.id, used=False
+    ).update({"used": True}, synchronize_session=False)
 
-    if error is not None:
-        session.pop('pending_signup_token', None)
-        flash("We could not create your account. Please try again.", "error")
-        return redirect(url_for('signup'))
+    if not consumed:
+        db.session.rollback()
+        flash("That code is invalid or has expired.", "error")
+        return redirect(url_for('forgot_password'))
 
-    session.pop('pending_signup_token', None)
-    flash("Account verified. Please log in.", "success")
+    user.password = hash_password(password)
+    user.auth_version = (user.auth_version or 1) + 1
+    db.session.commit()
+
+    session.clear()
+    flash("Your password has been reset. Please log in.", "success")
     return redirect(url_for('login'))
 
 
-@app.route('/signup/resend', methods=['POST'])
+@app.route('/reset_password/resend', methods=['POST'])
 @limiter.limit("5 per hour")
-def signup_resend():
-    token = session.get('pending_signup_token')
-    challenge = (
-        EmailVerification.query.filter_by(token=token).first() if token else None
-    )
+def reset_resend():
+    token, challenge = _pending_reset()
 
-    if challenge is None or challenge.used:
-        session.pop('pending_signup_token', None)
-        flash("Please start signup again.", "error")
-        return redirect(url_for('signup'))
+    if challenge is None:
+        session.pop(RESET_SESSION_KEY, None)
+        flash("Please request a password reset code.", "error")
+        return redirect(url_for('forgot_password'))
 
     now = _utcnow()
 
     if challenge.expires_at <= now:
         challenge.used = True
         db.session.commit()
-        session.pop('pending_signup_token', None)
-        flash("That verification code has expired. Please sign up again.", "error")
-        return redirect(url_for('signup'))
+        session.pop(RESET_SESSION_KEY, None)
+        flash("Please request a password reset code.", "error")
+        return redirect(url_for('forgot_password'))
 
     cooldown = app.config['OTP_RESEND_COOLDOWN_SECONDS']
 
     if (now - challenge.last_sent_at).total_seconds() < cooldown:
         flash("Please wait before requesting another code.", "error")
-        return redirect(url_for('signup_verify'))
+        return redirect(url_for('reset_password'))
 
     otp = generate_otp()
     challenge.otp_hash = hash_otp(app.config['OTP_SECRET'], token, otp)
@@ -295,14 +338,15 @@ def signup_resend():
     challenge.last_sent_at = now
     db.session.commit()
 
-    if not send_otp_email(challenge.email, otp):
-        challenge.used = True
-        db.session.commit()
-        flash("We could not send the verification email. Please try again.", "error")
-        return redirect(url_for('signup_verify'))
+    user = db.session.get(User, challenge.user_id) if challenge.user_id else None
 
-    flash("A new code has been sent.", "success")
-    return redirect(url_for('signup_verify'))
+    if user is not None and user.email == challenge.email:
+        if not send_otp_email(challenge.email, otp):
+            challenge.used = True
+            db.session.commit()
+
+    flash("If a reset request is active, a new code has been sent.", "success")
+    return redirect(url_for('reset_password'))
 
 
 @app.route('/login', methods=['POST', 'GET'])
@@ -324,16 +368,13 @@ def login():
         flash("Invalid email or password.", "error")
         return render_template('login.html'), 401
 
-    if not user.email_verified:
-        flash("Invalid email or password.", "error")
-        return render_template('login.html'), 401
-
     if not is_password_hash(user.password):
         user.password = hash_password(password)
         db.session.commit()
 
     session.clear()
     session['user_id'] = user.uid
+    session['auth_version'] = user.auth_version or 1
     session.permanent = True
     flash("Welcome back.", "success")
     return redirect(url_for('index'))
@@ -345,42 +386,6 @@ def logout():
     session.clear()
     flash("You have been logged out.", "success")
     return redirect(url_for('login'))
-
-
-@app.route('/account', methods=['GET', 'POST'])
-@login_required
-def account():
-    user = db.session.get(User, session['user_id'])
-
-    if request.method == 'GET':
-        return render_template('account.html', user=user)
-
-    email = normalize_email(request.form.get('email', ''))
-
-    if not email or not is_valid_email(email):
-        flash("Please enter a valid email address.", "error")
-        return render_template('account.html', user=user), 400
-
-    existing = User.query.filter(
-        User.email == email,
-        User.uid != user.uid,
-    ).first()
-
-    if existing is not None:
-        flash("That email address is already in use.", "error")
-        return render_template('account.html', user=user), 400
-
-    user.email = email
-
-    try:
-        db.session.commit()
-    except IntegrityError:
-        db.session.rollback()
-        flash("That email address is already in use.", "error")
-        return render_template('account.html', user=user), 400
-
-    flash("Email updated.", "success")
-    return redirect(url_for('account'))
 
 
 @app.route('/create_memory', methods=['GET', 'POST'])

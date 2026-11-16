@@ -92,11 +92,9 @@ if IS_VERCEL and RATELIMIT_STORAGE_URI == "memory://":
 AUTH_ENDPOINTS = {
     "login",
     "signup",
-    "signup_verify",
-    "signup_resend",
     "forgot_password",
     "reset_password",
-    "account",
+    "reset_resend",
 }
 
 
@@ -204,6 +202,9 @@ class User(db.Model):
     password = db.Column(db.String,nullable=False)
     email = db.Column(db.String,nullable=False)
     email_verified = db.Column(db.Boolean,nullable=False,default=False)
+    auth_version = db.Column(
+        db.Integer, nullable=False, default=1, server_default="1"
+    )
 
     def __repr__(self):
         return f'<User: {self.username}>'
@@ -226,6 +227,27 @@ class EmailVerification(db.Model):
 
     def __repr__(self):
         return f'<EmailVerification: {self.email}>'
+
+
+class PasswordReset(db.Model):
+    __tablename__ = 'password_resets'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.Integer, db.ForeignKey('users.uid'), nullable=True, index=True
+    )
+    email = db.Column(db.String, nullable=False, index=True)
+    token_hash = db.Column(db.String, nullable=False, unique=True)
+    otp_hash = db.Column(db.String, nullable=False)
+    attempts = db.Column(db.Integer, nullable=False, default=0)
+    used = db.Column(db.Boolean, nullable=False, default=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    last_sent_at = db.Column(db.DateTime, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+
+    def __repr__(self):
+        return f'<PasswordReset: {self.email}>'
+
 
 class Memory(db.Model):
     __tablename__ = 'memories'

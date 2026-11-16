@@ -59,13 +59,8 @@ def test_signup_hashes_password(client, app_module, sent_emails):
     )
 
     assert response.status_code == 302
-    assert response.headers["Location"].endswith("/signup/verify")
-    assert sent_emails[-1][0] == "alice@example.com"
-
-    verified = client.post("/signup/verify", data={"otp": sent_emails[-1][1]})
-
-    assert verified.status_code == 302
-    assert verified.headers["Location"].endswith("/login")
+    assert response.headers["Location"].endswith("/login")
+    assert sent_emails == []
 
     with app_module.app.app_context():
         user = app_module.User.query.filter_by(email="alice@example.com").one()
@@ -73,7 +68,7 @@ def test_signup_hashes_password(client, app_module, sent_emails):
         assert user.password != "password1234"
         assert is_password_hash(user.password)
         assert check_password_hash(user.password, "password1234")
-        assert user.email_verified is True
+        assert user.email_verified is False
 
 
 def test_signup_page_does_not_ask_for_username(client):
@@ -101,7 +96,7 @@ def test_signup_enforces_minimum_password_length(client):
 
 
 def test_public_pages_render(client):
-    for path in ("/", "/login", "/signup"):
+    for path in ("/", "/login", "/signup", "/forgot_password"):
         assert client.get(path).status_code == 200
 
 
@@ -130,6 +125,7 @@ def test_login_works_with_hashed_password(client, app_module):
 
     with client.session_transaction() as session:
         assert session["user_id"] == uid
+        assert session["auth_version"] == 1
 
 
 def test_legacy_plaintext_password_is_upgraded_on_login(client, app_module):
@@ -166,7 +162,7 @@ def test_invalid_login_uses_generic_error(client, app_module):
     assert b"Invalid email or password" in unknown_user.data
 
 
-def test_unverified_user_cannot_login(client, app_module):
+def test_unverified_user_can_login(client, app_module):
     create_user(app_module, email_verified=False)
 
     response = client.post(
@@ -174,11 +170,10 @@ def test_unverified_user_cannot_login(client, app_module):
         data={"email": "alice@example.com", "password": "password1234"},
     )
 
-    assert response.status_code == 401
-    assert b"Invalid email or password" in response.data
+    assert response.status_code == 302
 
     with client.session_transaction() as session:
-        assert "user_id" not in session
+        assert "user_id" in session
 
 
 def test_memory_detail_requires_login(client, app_module):
@@ -324,14 +319,10 @@ def test_https_signup_csrf_requires_same_origin_referer(client, app, app_module)
 
     with app_module.app.app_context():
         assert (
-            app_module.EmailVerification.query.filter_by(
-                email="https-user@example.com"
-            ).count()
+            app_module.User.query.filter_by(email="https-user@example.com").count()
             == 1
         )
-        assert (
-            app_module.User.query.filter_by(email="https-user@example.com").count() == 0
-        )
+        assert app_module.EmailVerification.query.count() == 0
 
 
 def test_logout_requires_post(client, app_module):

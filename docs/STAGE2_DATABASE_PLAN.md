@@ -112,27 +112,42 @@ disposable (approved). `email_verified_at` was not added; a boolean
   last_sent_at, created_at).
 - Downgrade: drop the table, drop `email_verified`, and make `email` nullable.
 - Risk: medium. Requires a clean reset (approved) because `email` is NOT NULL.
-- Config/UI: signup OTP verification, login by email, account settings page.
+- Config/UI: login by email. (Signup OTP verification and the account settings page were
+  later removed; the table is retained as legacy.)
 
-### 4.3 Add `users.auth_version` (session invalidation)
+### 4.3 Add `users.auth_version` (session invalidation) - IMPLEMENTED
+
+Status: implemented as part of `7c1a9e4b2f60` (with `password_resets`).
 
 - Change: add `auth_version` INTEGER NOT NULL with `server_default="1"`.
 - Rationale: password reset and "log out everywhere" invalidate existing sessions
   by comparing the session's stored version against the row.
-- App change: store `auth_version` in the session at login; `login_required`
-  compares and clears the session on mismatch.
+- App change: login stores `session['auth_version']`; `login_required` compares it
+  and clears the session on mismatch. A password reset increments the column.
 - Downgrade: drop the column.
-- Risk: low. Defaulted column, no manual backfill needed.
+- Risk: low. Defaulted column, no manual backfill needed. Sessions created before
+  this change lack the value and are cleared once.
 
-### 4.4 Add `password_reset_tokens`
+### 4.4 Add `password_resets` - IMPLEMENTED
 
-- Columns: `id` PK, `user_id` FK -> users.uid, `token_hash` (store a hash, never
-  the raw token), `created_at`, `expires_at`, `used_at` (nullable).
-- Index on `token_hash` (unique) and `user_id`.
-- Single-use: set `used_at` on consumption; reject expired/used tokens.
-- Rate limit forgot-password and reset-password routes; avoid account enumeration.
+Status: implemented as `7c1a9e4b2f60`. The table is named `password_resets` (not
+`password_reset_tokens`).
+
+- Columns: `id` PK, nullable `user_id` FK -> users.uid (indexed), indexed `email`,
+  `token_hash` (unique; HMAC-SHA256, never the raw token), `otp_hash`,
+  `attempts`, `used`, `expires_at`, `last_sent_at`, `created_at`.
+- Single-use: consume with a guarded `UPDATE ... WHERE used = false`; reject
+  expired/used challenges and increment attempts on wrong codes.
+- A challenge is created for both known and unknown emails; email is sent only when
+  the account exists, so responses do not reveal registration.
+- Rate limit forgot-password (5/hour), reset-password (10/hour), and resend
+  (5/hour). Reuse `OTP_TTL_SECONDS`, `OTP_MAX_ATTEMPTS`, and
+  `OTP_RESEND_COOLDOWN_SECONDS`.
+- Session invalidation uses `users.auth_version` (section 4.3).
 - Downgrade: drop the table.
 - Risk: low. New table; no effect on existing rows.
+- Note: signup no longer uses `email_verifications`; that table/model is retained
+  as legacy and is intentionally not dropped by this migration.
 
 ### 4.5 Add `photos` (Cloudinary metadata)
 
@@ -178,17 +193,23 @@ The authoritative, step-by-step runbook is `PROJECT_STATUS.md` section 12. Summa
    and comparing row counts. `pg_restore --list` is not sufficient verification.
 3. Because the existing production data is disposable (approved), reset ONLY the
    application objects instead of stamping the legacy schema:
-   `DROP TABLE IF EXISTS email_verifications, memories, users, alembic_version CASCADE;`
+   `DROP TABLE IF EXISTS password_resets, email_verifications, memories, users, alembic_version CASCADE;`
    (drop `memories` before `users`; do not use `DROP SCHEMA public CASCADE`).
 4. Apply the full chain from base: `flask --app app db upgrade` -> head
-   `fc35b4ffa9c0`.
-5. Verify the live schema and smoke-test signup/login/memory flows.
+   `7c1a9e4b2f60`.
+5. Verify the live schema and smoke-test signup/login/memory/forgot-password flows.
 6. Keep the pre-reset backup until the change is confirmed healthy.
 
 The full chain `897fe5622bb6 -> 6694a1a15bcb -> fc35b4ffa9c0` has been validated
 against a fresh, disposable PostgreSQL 16.4 database (not only SQLite), including
 `flask db check`, `downgrade base`, re-`upgrade`, and a `pg_dump`/`pg_restore`
 round-trip. See `PROJECT_STATUS.md` section 12.
+
+Revision `7c1a9e4b2f60` (`users.auth_version` + `password_resets`) has been
+validated on a disposable SQLite database: `upgrade` to head, `db check` with no
+drift, `downgrade fc35b4ffa9c0`, and `upgrade` again. It does not require a reset;
+it can be applied incrementally to the existing production schema after a verified
+backup.
 
 Deployment gap to resolve before the first production migration: the repository has
 no `vercel.json` and no build step that runs `flask db upgrade`. Migrations must run
@@ -213,18 +234,23 @@ operation.
 1. Reset Neon to base and apply the full chain (approval required) - see section 6
    and `PROJECT_STATUS.md` section 12. Superseded the original "baseline stamp"
    approach because production data is disposable.
-2. `users.email` + `email_verifications` (signup OTP) + account settings UI -
-   DONE (`6694a1a15bcb`, `fc35b4ffa9c0`).
+2. `users.email` + `email_verifications` (signup OTP) - DONE (`6694a1a15bcb`,
+   `fc35b4ffa9c0`). The account settings UI added here was later removed.
 3. `memories.user_id` index.
-4. `users.auth_version` + session invalidation.
-5. `password_reset_tokens` + Resend flows.
+4. `users.auth_version` + session invalidation - DONE (`7c1a9e4b2f60`).
+5. `password_resets` + Resend reset flows - DONE (`7c1a9e4b2f60`).
 6. `photos` + Cloudinary uploads and CSP/config review.
 7. `audio_memories` + browser recording/playback.
 8. Frontend redesign with GSAP after backend flows are stable.
 
 ## 9. Open questions
 
-- Email verification: resolved - required at signup via a 6-digit OTP (`fc35b4ffa9c0`).
+- Email verification: resolved and then superseded - `fc35b4ffa9c0` added the OTP
+  challenge table, but signup now creates accounts immediately without email
+  verification. `email_verified` remains stored but does not gate login;
+  `email_verifications` is legacy/unused.
+- Password reset: resolved - `password_resets` + `users.auth_version` (`7c1a9e4b2f60`).
+- Retention policy for reset rows: used or expired rows are purged on the next
+  forgot-password request; long-term retention can be revisited if volume grows.
 - Cover-photo selection UX and locked-memory photo preview rules.
-- Retention policy for reset tokens and expired/used rows.
 - Whether to automate `flask db upgrade` in the Vercel release step.

@@ -15,6 +15,12 @@ def hash_otp(secret, token, otp):
     return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
+def hash_token(secret, token):
+    return hmac.new(
+        secret.encode("utf-8"), token.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
 def verify_otp(secret, token, otp, expected_hash):
     if not otp or not expected_hash:
         return False

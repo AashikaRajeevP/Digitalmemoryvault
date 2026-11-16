@@ -8,7 +8,7 @@ Built using **Python and Flask**, the project combines a simple and secure user 
 
 ### Key Features
 
-- **User Authentication:** Register, log in, and manage a personal account.
+- **User Authentication:** Register, log in, reset a forgotten password, and manage your memories.
 - **Create Memories:** Save personal thoughts, experiences, and messages.
 - **Time-Locked Memories:** Set a future date for each memory to become accessible.
 - **Countdown:** See how many days remain before a locked memory can be opened.

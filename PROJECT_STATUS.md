@@ -4,9 +4,9 @@ Last updated: 2026-11-16
 
 - Repository: `AashikaRajeevP/memoryvault`
 - Branch: `master`
-- HEAD: `112a1b2 Correct Stage 3 production migration runbook`
-- Remote status: local `HEAD` matches `origin/master` (`112a1b2`).
-- Working tree at inspection: the signup simplification (email/password only, generated internal username) is uncommitted. Modified: `routes.py`, `templates/signup.html`, `templates/account.html`, `tests/test_accounts.py`, `tests/test_security.py`, `tests/test_signup_verification.py`, `PROJECT_STATUS.md`. The existing database schema is unchanged. Not committed, not pushed, not deployed.
+- HEAD: `d9ec607 Simplify signup to email and password only`
+- Remote status: local `HEAD` is ahead of `origin/master` (`112a1b2`).
+- Working tree at inspection: signup is email/password only with immediate account creation, and a Forgot Password flow using email OTP is implemented. Modified/added: `app.py`, `routes.py`, `services/otp.py`, `templates/login.html`, `templates/forgot_password.html`, `templates/reset_password.html`, `migrations/versions/7c1a9e4b2f60_password_reset.py`, `tests/test_accounts.py`, `tests/test_security.py`, `tests/test_password_reset.py`, and this document. Removed: `templates/verify.html`, `tests/test_signup_verification.py`, and `templates/account.html` (Account Settings feature removed). New migration `7c1a9e4b2f60` is validated locally but **not applied to Neon**. Not committed, not pushed, not deployed.
 
 ## Status Legend
 
@@ -19,7 +19,7 @@ Last updated: 2026-11-16
 
 Digital Memory Vault is a Flask web application for preserving personal memories as a digital time capsule. Users create memories with a future open date. A memory remains locked until that date, with locked entries showing a countdown. Each user manages their own memories and can view total, locked, and unlocked counts.
 
-The long-term goal is to extend the vault with photo attachments, voice memories, account email settings, password reset, and a redesigned frontend while preserving the existing Flask/Jinja/SQLAlchemy architecture.
+The long-term goal is to extend the vault with photo attachments, voice memories, password reset, and a redesigned frontend while preserving the existing Flask/Jinja/SQLAlchemy architecture.
 
 ## 2. Technology Stack and Architecture
 
@@ -31,11 +31,11 @@ The long-term goal is to extend the vault with photo attachments, voice memories
 - Flask-SQLAlchemy 3.1.1 / SQLAlchemy
 - PostgreSQL via Neon in production
 - SQLite locally when `DATABASE_URL` is blank
-- Flask-Migrate 4.1.0 is wired in `app.py`; `migrations/` holds baseline `897fe5622bb6`, email revision `6694a1a15bcb`, and email-verification revision `fc35b4ffa9c0`
+- Flask-Migrate 4.1.0 is wired in `app.py`; `migrations/` holds baseline `897fe5622bb6`, email revision `6694a1a15bcb`, email-verification revision `fc35b4ffa9c0`, and password-reset/auth-version revision `7c1a9e4b2f60`
 - Flask-WTF 1.3.0 for CSRF
 - Flask-Limiter 4.1.1 with Redis support
 - redis-py 8.1.0
-- resend 2.21.0 for signup verification email
+- resend 2.21.0 for verification and password-reset email
 - Werkzeug 3.1.8
 - python-dotenv 1.2.4
 - psycopg2-binary 2.9.13
@@ -44,13 +44,13 @@ The long-term goal is to extend the vault with photo attachments, voice memories
 
 ### Current architecture
 
-- `app.py` creates the Flask app, loads configuration, initializes extensions (including Flask-Migrate), defines the `User`, `EmailVerification`, and `Memory` models inline, and imports `routes.py`. Schema is created by migrations, not at import.
+- `app.py` creates the Flask app, loads configuration, initializes extensions (including Flask-Migrate), defines the `User`, `EmailVerification` (legacy, unused), `PasswordReset`, and `Memory` models inline, and imports `routes.py`. Schema is created by migrations, not at import.
 - `routes.py` contains all routes, auth helpers, validation, rate limits, and ownership checks.
 - `services/security.py` contains password hash detection, hashing, and verification helpers.
 - `services/accounts.py` contains email normalization and validation helpers.
 - `services/otp.py` contains OTP generation and HMAC-SHA256 hashing/verification helpers.
 - `services/email.py` contains the Resend OTP email sender (lazy import; no-op when delivery is disabled or under test).
-- `templates/` contains Jinja templates: home, login, signup, account settings, create memory, my memories, memory detail, error, and base layout.
+- `templates/` contains Jinja templates: home, login, signup, forgot password, reset password, create memory, my memories, memory detail, error, and base layout.
 - `tests/` contains pytest configuration and security/behavior tests using a temporary SQLite database.
 - `scripts/hash_existing_passwords.py` is a guarded dry-run/apply utility for converting legacy plaintext passwords to hashes.
 - `migrate_to_postgres.py` is a SQLite-to-PostgreSQL copy utility. It is not part of the normal app runtime.
@@ -69,11 +69,12 @@ The long-term goal is to extend the vault with photo attachments, voice memories
 
 Implemented and locally tested:
 
-- Two-step signup: collect email and password only, then verify a 6-digit code emailed via Resend before the account is created. The legacy `username` column is filled with a generated internal value (`user:<normalized_email>`, with a numeric suffix if needed) and is not shown to the user.
-- Email verification OTP: single-use, 5-minute expiry, HMAC-SHA256 hashed (never stored or logged in plaintext), attempt-limited, resend cooldown, session-bound, and previous codes invalidated on resend.
-- User login by email with hashed passwords; unverified accounts cannot log in.
+- Signup with email and password only: the account is created immediately (unverified), then the user is redirected to login. No email is sent at signup. The legacy `username` column is filled with a generated internal value (`user:<normalized_email>`, with a numeric suffix if needed) and is not shown to the user.
+- Forgot Password flow: request a 6-digit OTP by email, verify it, and set a new password. Uses the same OTP utilities as before.
+- Password-reset OTP security: single-use, 5-minute expiry, HMAC-SHA256 hashed (never stored or logged in plaintext), attempt-limited, resend cooldown, session-bound, and previous codes invalidated on resend and on successful reset.
+- User login by email with hashed passwords; `email_verified` is stored but no longer gates login (new signups are unverified and can log in immediately).
+- Existing sessions are invalidated after a password reset via `users.auth_version`.
 - Required email on user accounts with format validation, normalization, and uniqueness.
-- Account settings page (`/account`) for logged-in users to update their own email.
 - Legacy plaintext password compatibility: a successful login automatically upgrades the stored plaintext password to a Werkzeug hash.
 - User logout using a POST-only route.
 - Create a memory with title, message, and open date.
@@ -91,7 +92,6 @@ Implemented and locally tested:
 
 Not yet implemented:
 
-- Password reset (forgot/reset flow).
 - Photo or audio attachments.
 - Frontend redesign and GSAP animations.
 - Applying schema migrations to production Neon.
@@ -133,6 +133,9 @@ Stage 1 is **implemented, tested locally, committed, and pushed**. Production ve
   - Signup: 5 per hour
   - Login: 10 per minute
   - Create memory: 60 per hour
+  - Forgot password: 5 per hour
+  - Reset password (submit): 10 per hour
+  - Reset code resend: 5 per hour
 
 ### 12-character minimum password
 
@@ -170,9 +173,9 @@ Stage 1 is **implemented, tested locally, committed, and pushed**. Production ve
 - The development-only `/test` route was removed.
 - CSRF error, 404, 413, and 500 handlers were added.
 
-## 5. Stage 3 Email, Account Settings, and Signup Verification
+## 5. Stage 3 Email and Signup Verification
 
-Stage 3 FIX is **implemented, tested locally, committed, and pushed**. Signup was then simplified to email and password only; that follow-up is **implemented and tested locally** but not yet committed. See sections 8 and 12 for production database status.
+Stage 3 FIX is **implemented, tested locally, committed, and pushed**. Signup was then simplified to email and password only, and a Forgot Password flow was added; those follow-ups are **implemented and tested locally** but not yet committed. See sections 8 and 12 for production database status.
 
 ### Email field
 
@@ -181,64 +184,77 @@ Stage 3 FIX is **implemented, tested locally, committed, and pushed**. Signup wa
 - Email is normalized (trimmed and lowercased) before storage and comparison.
 - Format is validated in `services/accounts.py` (`normalize_email`, `is_valid_email`, max length 254).
 
-### Signup (two-step with OTP)
+### Signup (email and password only)
 
-- `GET/POST /signup` validates password and email, then creates a pending `EmailVerification` row. No `User` row is created yet.
+- `GET/POST /signup` validates password and email, then creates the `User` immediately with `email_verified=False`. No email is sent at signup.
 - The signup page collects **email and password only**. No username is shown or accepted from the user.
 - The legacy `users.username` column remains `NOT NULL UNIQUE` (the schema is unchanged). New accounts receive an internal generated username: `user:<normalized_email>`. If that value already belongs to an old account, a numeric suffix (`-2`, `-3`, ...) is added until it is free.
-- A 6-digit code is emailed via Resend and the pending challenge token is stored in the session (`pending_signup_token`).
-- `POST /signup/verify` verifies the code, re-checks email uniqueness, generates a fresh unique internal username, then creates the `User` with `email_verified=True`.
-- If an internal username collision occurs between signup and verification, the user creation is retried with the next free suffix; if the email was registered in the meantime, the challenge is closed and the user is asked to log in.
-- After successful verification the user is **not** logged in; they are redirected to `/login` (decision 3).
-- `POST /signup/resend` issues a new code subject to a cooldown; the previous code is invalidated.
-- Duplicate emails that belong to an already-registered user are rejected; a pending (unverified) signup for the same email is replaced as a retry.
+- Internal username collisions are retried with the next free suffix; a duplicate email registered in the meantime is rejected.
+- After successful signup the user is **not** logged in; they are redirected to `/login`.
+- Registered duplicate emails are rejected. The former two-step challenge routes (`/signup/verify`, `/signup/resend`) and `templates/verify.html` were removed. The `EmailVerification` model/table is retained as legacy/unused and is not dropped.
+- `email_verified` is stored but no longer gates login, so an account created by the immediate signup can log in right away.
+
+### Forgot Password (email OTP)
+
+- `GET/POST /forgot_password` accepts a registered email and always responds with the same message: "If an account exists for that email, we've sent a password reset code." This avoids account enumeration.
+- A `PasswordReset` challenge is created for every syntactically valid email; an email is sent only when a matching account exists.
+- `GET/POST /reset_password` verifies the 6-digit OTP and sets a new password. The form also requires `confirm_password`.
+- Passwords are validated (length and confirmation) before OTP verification, so a valid OTP cannot be probed with an invalid password submission.
+- A successful reset hashes the new password with the existing Werkzeug method, increments `users.auth_version`, clears the session, and redirects to `/login`.
+- `POST /reset_password/resend` issues a new code subject to a cooldown; the previous code is invalidated and attempts are reset.
+- Both known and unknown emails are session-bound through `pending_reset_token`; unknown-email challenges can never produce a password change.
+- Rate limits: forgot password 5/hour, reset submit 10/hour, resend 5/hour.
+- `send_otp_email` is reused unchanged; the Resend dependency and configuration remain in place.
 
 ### OTP security
 
 - Codes are generated with `secrets.randbelow` and stored only as an HMAC-SHA256 digest (`services/otp.py`) keyed by `OTP_SECRET`, bound to the challenge token. Plaintext codes are never stored, logged, or returned.
-- Single-use: a challenge is marked `used` on success and on attempt-limit breach.
+- `services/otp.py` also provides `hash_token`, used to store only the HMAC-SHA256 digest of reset challenge tokens.
+- Single-use: a challenge is marked `used` on success and on attempt-limit breach. Reset consumption uses a guarded `UPDATE ... WHERE used = false` so concurrent submissions cannot both succeed.
 - Expiry: `OTP_TTL_SECONDS` (default 300). Expired challenges are rejected and purged.
 - Attempt limit: `OTP_MAX_ATTEMPTS` (default 5); breaching it invalidates the challenge.
 - Resend cooldown: `OTP_RESEND_COOLDOWN_SECONDS` (default 60); a resend regenerates the code, resets attempts, and invalidates the prior code.
-- Session binding: verification requires the matching `pending_signup_token` in the session.
-- Cleanup: used or expired challenges are deleted on the next signup (`_purge_expired_verifications`).
+- Session binding: reset verification requires the matching `pending_reset_token` in the session.
+- Cleanup: used or expired reset challenges are deleted on the next forgot-password request (`_purge_expired_resets`).
 - `OTP_SECRET` falls back to `SECRET_KEY` when unset, but a dedicated value is recommended.
 
-### Login
+### Login and session invalidation
 
 - Login is by **email** (not username) plus password.
-- Unknown email, wrong password, and unverified account all return the same generic error (`Invalid email or password.`) with HTTP 401.
+- Unknown email and wrong password return the same generic error (`Invalid email or password.`) with HTTP 401.
 - Unknown emails still perform a dummy password verification to reduce timing differences.
 - Legacy plaintext passwords are upgraded to a hash on successful login.
-- Login never sends an OTP.
+- Login never sends an OTP. `email_verified` is not checked.
+- Login stores `session['auth_version']`; `login_required` compares it with `users.auth_version` and clears stale sessions after a password reset or a manual version bump.
 
-### Account settings
+### Account settings (removed)
 
-- `GET /account` and `POST /account`, protected by `login_required`, let the user update their own email.
-- The route only reads/writes the row for `session['user_id']`; there is no user id parameter, so a user cannot target another account.
-- Duplicate emails are rejected, excluding the user's own current email.
+- The `/account` page and route were removed along with the email-change form, the Account Settings navigation link, `templates/account.html`, and their tests.
+- Users can no longer change their email in-app; the email captured at signup is the address used by Forgot Password.
+- The `User` model and its fields (`username`, `password`, `email`, `email_verified`, `auth_version`) are unchanged, and no migration was needed.
 
 ### CSRF and security
 
 - All forms include a hidden `csrf_token`; the global `CSRFProtect` enforces it.
-- `signup_verify` and `signup_resend` were added to `AUTH_ENDPOINTS`, so those pages are `noindex, nofollow` and send `Referrer-Policy: same-origin`.
+- `forgot_password`, `reset_password`, and `reset_resend` are in `AUTH_ENDPOINTS`, so those pages are `noindex, nofollow` and send `Referrer-Policy: same-origin`.
 - Existing authentication, password hashing, session lifetime, and memory behavior are unchanged.
 
 ### Migration
 
-- Revision: `fc35b4ffa9c0` (`email verification`), down revision `6694a1a15bcb` (additive; history preserved).
-- Adds the `email_verifications` table, adds `users.email_verified` (`NOT NULL DEFAULT false`), and alters `users.email` to `NOT NULL`.
-- Validated on a disposable SQLite database: `flask db upgrade` applies cleanly, `flask db check` reports no drift, and the `ix_users_email` unique index survives the batch table rebuild.
-- Reported applied to Neon on 2026-11-16 (Alembic head `fc35b4ffa9c0`); not independently verified in this session.
+- Revision: `7c1a9e4b2f60` (`password reset and auth version`), down revision `fc35b4ffa9c0` (additive; history preserved).
+- Adds `users.auth_version` (`INTEGER NOT NULL DEFAULT 1`) and the `password_resets` table: `id`, nullable indexed `user_id` FK to `users.uid`, indexed `email`, unique `token_hash`, `otp_hash`, `attempts`, `used`, `expires_at`, `last_sent_at`, `created_at`.
+- Validated on a disposable SQLite database: `flask db upgrade` applies the full chain to `7c1a9e4b2f60`, `flask db check` reports no drift, and `downgrade` to `fc35b4ffa9c0` then `upgrade` again succeeds cleanly.
+- **Not applied to Neon.** The reported production head remains `fc35b4ffa9c0`.
+- Prior revision `fc35b4ffa9c0` added the `email_verifications` table, `users.email_verified` (`NOT NULL DEFAULT false`), and `NOT NULL` on `users.email`; it is reported applied to Neon on 2026-11-16 and was not independently verified in this session.
 
 ## 6. Current Deployment Status
 
 ### Vercel
 
 - The project is deployed/reported as deployed on Vercel.
-- The current HEAD `112a1b2` matches `origin/master`. The signup simplification is uncommitted and not deployed.
-- Vercel deployment of the signup simplification is **not verified from this session**.
-- The user reports that the Neon production migration completed with Alembic head `fc35b4ffa9c0`; this was **not independently verified** in this inspection.
+- The current HEAD is `d9ec607` (`master` is ahead of `origin/master` at `112a1b2`). The signup simplification and Forgot Password flow are uncommitted and not deployed.
+- Vercel deployment of the signup simplification and Forgot Password flow is **not verified from this session**.
+- The user reports that the Neon production migration completed with Alembic head `fc35b4ffa9c0`; the new `7c1a9e4b2f60` migration has **not** been applied.
 
 ### Neon PostgreSQL
 
@@ -275,42 +291,31 @@ python -m pytest -q
 Latest result:
 
 ```text
-66 passed
+69 passed
 ```
 
 Test coverage includes:
 
 - Resend email service: no-op when disabled or under test; sends the expected payload when enabled; returns `False` and does not log the OTP on provider failure.
 
-- Signup creates a pending challenge, not a user.
-- Signup does not authenticate before verification.
-- The OTP is 6 digits and is not exposed in the response or logged.
-- Only the HMAC-SHA256 digest is stored (verified against `OTP_SECRET` + token).
-- Verification success creates a verified user and redirects to login without authenticating.
-- Verification failure increments attempts; breaching the limit invalidates the challenge.
-- Expired codes are rejected; codes are single-use.
-- Verification requires a pending session token and rejects unknown challenges.
-- Verification requires CSRF.
-- Resend requires a pending session, enforces the cooldown, resets attempts, and invalidates the previous code.
-- Email-send failure marks the challenge used for both signup and resend.
-- Expired challenges are purged on the next signup.
-- Login does not send an OTP.
-- Signup hashes passwords.
-- Signup stores a normalized email.
-- Signup generates the internal username `user:<normalized_email>`.
-- A generated username collision adds a numeric suffix.
-- A username collision between signup and verification is retried safely.
-- Signup requires a valid email and rejects invalid formats.
-- Registered duplicate emails are rejected (case-insensitively).
+- Signup creates the account immediately and redirects to login without sending email.
+- Signup does not authenticate the new account.
+- Signup stores `email_verified=False` and a normalized email.
+- Signup hashes passwords; the internal username is `user:<normalized_email>`, with a numeric suffix on collision.
+- Unverified accounts can log in by email.
+- Signup requires a valid email and rejects invalid formats and duplicate emails.
 - The signup page does not ask for a username.
-- An email registered between signup and verification is rejected.
-- Verified users can log in by email; unverified users cannot.
-- Account settings requires login.
-- Account settings shows and updates the current user's email.
-- Account settings does not display the internal username.
-- Account updates reject invalid and duplicate emails.
-- A user cannot modify another user's account.
-- Account updates require a CSRF token.
+- Forgot Password renders and is linked from the login page.
+- A reset request for an existing email sends a 6-digit OTP and creates a session-bound challenge.
+- A reset request for an unknown email creates a challenge but sends nothing and returns the same message.
+- Only HMAC-SHA256 digests of the token and OTP are stored.
+- Reset success hashes the new password, marks the challenge used, and redirects to login.
+- Wrong, expired, reused, unknown-session, unknown-token, unknown-email, and changed-email cases are rejected.
+- Attempt limits invalidate the challenge; resend enforces the cooldown, resets attempts, and invalidates the previous OTP.
+- Password length and confirmation are validated without consuming attempts.
+- Email-send failure consumes the challenge; the OTP is never logged.
+- Password reset increments `auth_version` and invalidates existing sessions; `login_required` rejects a stale version.
+- Forgot/reset/resend require CSRF.
 - Minimum password length is 12.
 - Public pages render.
 - Authenticated pages render.
@@ -340,7 +345,7 @@ Important testing caveats:
 
 ### Neon status at last inspection
 
-> Update 2026-11-16: the user reports that the production Neon migration completed and the current Alembic head is `fc35b4ffa9c0`. The 2026-11-14 inspection below is retained as historical context; it was not rechecked in this session.
+> Update 2026-11-16: the user reports that the production Neon migration completed and the current Alembic head is `fc35b4ffa9c0`. The new `7c1a9e4b2f60` migration (auth version + password resets) is implemented and validated locally but has **not** been applied to Neon. The 2026-11-14 inspection below is retained as historical context; it was not rechecked in this session.
 
 Last verified: 2026-11-14 during read-only backup/inspection. This was not rechecked during the current review.
 
@@ -352,7 +357,7 @@ Last verified: 2026-11-14 during read-only backup/inspection. This was not reche
 - At that inspection there was no `email` column in production, which was why production signup/login returned HTTP 500 before the migration. The code defines `email` (NOT NULL) via migrations `6694a1a15bcb` and `fc35b4ffa9c0`; the user reports these are now applied.
 - All 7 passwords were plaintext at inspection time
 - No `alembic_version` table
-- No password-reset-token table
+- No password-reset-token table at inspection. The code now defines `password_resets` via migration `7c1a9e4b2f60`; it is not yet applied to Neon.
 - No photo/audio attachment tables
 - No index on `memories.user_id`
 - No duplicate usernames or orphan memories found at inspection
@@ -380,14 +385,15 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 - The app now uses Alembic migrations (`migrations/`); the import-time `db.create_all()` was removed.
 - Future migrations must be tested on a disposable database and applied to Neon only after a verified backup and explicit approval.
 - The pre-migration reset plan in section 12 is retained as historical context. Do not delete production data or run migrations against Neon without explicit approval.
-- Production database status: reported migrated to `fc35b4ffa9c0` on 2026-11-16; not independently verified in this session. The historical details above describe the pre-migration state.
+- Production database status: reported migrated to `fc35b4ffa9c0` on 2026-11-16; not independently verified in this session. Migration `7c1a9e4b2f60` must be applied before the new reset flow works in production. The historical details above describe the pre-migration state.
 
 ## 9. Features Still to Implement
 
-### Email and account settings
+### Email
 
-- Implemented: required email column, two-step signup with email OTP verification, login by email, the `/account` settings page (Stage 3, migrations `6694a1a15bcb` and `fc35b4ffa9c0`), and signup with email/password only plus a generated internal username.
-- The production migration is reported complete (`fc35b4ffa9c0`); it was not independently verified in this session (see section 8).
+- Implemented: required email column, login by email, signup with email/password only plus a generated internal username, and the Forgot Password flow (migrations `6694a1a15bcb`, `fc35b4ffa9c0`, and `7c1a9e4b2f60`).
+- Account Settings (`/account`, email change) was implemented in Stage 3 and has since been removed; users cannot change their email in-app.
+- The production migration is reported complete through `fc35b4ffa9c0`; `7c1a9e4b2f60` is local-only and has not been applied to Neon (see section 8).
 
 ### Photo uploads through Cloudinary
 
@@ -406,14 +412,14 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 - `Permissions-Policy` already permits same-origin microphone use.
 - CSP already permits same-origin/blob and Cloudinary media sources.
 
-### Forgot/reset password using Resend
+### Forgot/reset password using Resend (implemented)
 
-- Add Resend configuration and dependency.
-- Add single-use, expiring reset tokens.
-- Add `auth_version` or equivalent session invalidation.
-- Add forgot-password and reset-password routes, templates, and rate limits.
-- Avoid account enumeration in responses.
-- Test token expiry, reuse prevention, and session invalidation.
+- Resend configuration and dependency were already present and are reused unchanged.
+- Implemented single-use, expiring, HMAC-hashed reset challenges in `password_resets`.
+- Implemented `users.auth_version` session invalidation.
+- Implemented forgot-password, reset-password, and resend routes, templates, and rate limits.
+- Responses do not reveal whether an email is registered.
+- Tests cover expiry, reuse prevention, attempt limits, resend cooldown, and session invalidation.
 
 ### Frontend redesign with GSAP
 
@@ -425,9 +431,9 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 ### Database and migration work
 
 - Flask-Migrate is now wired and `migrations/` is scaffolded with baseline revision `897fe5622bb6`.
-- Email migration `6694a1a15bcb` (adds `users.email` + unique index `ix_users_email`) and email-verification migration `fc35b4ffa9c0` (adds `email_verifications`, `users.email_verified`, and `NOT NULL` on `users.email`) are implemented and validated locally. The user reports both applied to production (`fc35b4ffa9c0`); this was not independently verified in this session.
+- Email migration `6694a1a15bcb` (adds `users.email` + unique index `ix_users_email`), email-verification migration `fc35b4ffa9c0` (adds `email_verifications`, `users.email_verified`, and `NOT NULL` on `users.email`), and password-reset migration `7c1a9e4b2f60` (adds `users.auth_version` and `password_resets`) are implemented and validated locally. The user reports the first two applied to production (`fc35b4ffa9c0`); this was not independently verified in this session. `7c1a9e4b2f60` is **not applied**.
 - `db.create_all()` at import was removed; schema is owned by migrations. Local setup now requires `flask --app app db upgrade`.
-- The production reset plan in section 12 is retained as historical context. The existing database schema is unchanged by the signup simplification.
+- The production reset plan in section 12 is retained as historical context. The signup simplification needs no schema change; the Forgot Password flow requires `7c1a9e4b2f60`.
 - Back up Neon before any migration.
 - Test migrations on a disposable database and show SQL before applying to Neon.
 
@@ -442,7 +448,10 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 - Keep CSRF protection enabled; do not exempt auth routes.
 - Keep `WTF_CSRF_SSL_STRICT` enabled.
 - Keep ownership checks on every memory and future media operation.
-- Use Cloudinary for photos/audio storage and Resend for signup verification and password-reset email.
+- Use Cloudinary for photos/audio storage and Resend for password-reset email.
+- Signup creates accounts immediately with email + password and sends no email; accounts are created with `email_verified=False`, and `email_verified` does not gate login.
+- Invalidate sessions after a password reset by comparing `session['auth_version']` with `users.auth_version`.
+- Keep the `EmailVerification` model/table as legacy data; do not drop it in this change.
 - Use Upstash Redis with a `rediss://` TLS URL for shared rate limiting on Vercel.
 - Never commit `.env`, credentials, database files, or backups.
 - Back up Neon before database changes.
@@ -451,20 +460,20 @@ Backups contain sensitive data, including plaintext passwords from the inspectio
 
 ## 11. Exact Next Steps
 
-1. Review and commit the uncommitted signup simplification (`routes.py`, `templates/signup.html`, `templates/account.html`, the affected tests, and this document), then push.
+1. Review and commit the uncommitted signup simplification and Forgot Password flow (`app.py`, `routes.py`, `services/otp.py`, templates, migration `7c1a9e4b2f60`, the affected tests, and this document), then push.
 2. Vercel environment variables are configured: `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `RESEND_ENABLED=true`, and `OTP_SECRET` (see section 12). Confirm `RESEND_ENABLED` is exactly `true`/`1`/`yes`.
 3. Verify a Resend sending domain for production; `onboarding@resend.dev` is testing-only (see section 12).
 4. A Neon backup exists at `C:\Users\hp\Desktop\memoryvault_backup.dump`; verify it by restoring into a separate disposable PostgreSQL database, not just `pg_restore --list` (see section 12).
-5. The production reset/migration is reported complete (`fc35b4ffa9c0`); keep section 12 as historical context.
-6. Verify production signup (two-step OTP) and login over HTTPS.
-7. Verify the 6-digit code email arrives from the verified sender domain.
+5. Back up Neon again, then apply migration `7c1a9e4b2f60` with explicit approval. The reported production head is `fc35b4ffa9c0`.
+6. Verify production signup (immediate account creation, no email), login, and the Forgot Password flow over HTTPS.
+7. Verify the 6-digit reset code email arrives from the verified sender domain.
 8. Confirm auth responses send `Referrer-Policy: same-origin` and that session cookies are present.
 9. Confirm Vercel has `RATELIMIT_STORAGE_URI` set to the Upstash Redis TLS URL, then redeploy if it changed.
 10. Confirm `SECRET_KEY` and `OTP_SECRET` are stable across Vercel deployments and instances.
 
 ## 12. Production Reset and Deployment Plan (historical; reported completed 2026-11-16)
 
-> This runbook is retained as historical context. The user reports that the production Neon migration completed with Alembic head `fc35b4ffa9c0`; it was not independently verified in this session.
+> This runbook is retained as historical context. The user reports that the production Neon migration completed with Alembic head `fc35b4ffa9c0`; it was not independently verified in this session. The migration chain now continues to `7c1a9e4b2f60` (auth version + password resets), which only needs an incremental `flask db upgrade` after a fresh backup — no reset is required for it.
 
 The existing Neon data is disposable (approved). The plan is to verify the existing backup by restoring it into a separate disposable PostgreSQL database, then drop ONLY the four application objects and rebuild the schema from scratch with the full migration chain. The Stage 3 FIX code is already pushed (`3f719d7`).
 
@@ -519,20 +528,21 @@ flask --app app db current
 flask --app app db check
 ```
 
-Expected chain: `897fe5622bb6` (initial) -> `6694a1a15bcb` (add users email) -> `fc35b4ffa9c0` (email verification, head).
+Expected chain: `897fe5622bb6` (initial) -> `6694a1a15bcb` (add users email) -> `fc35b4ffa9c0` (email verification) -> `7c1a9e4b2f60` (password reset and auth version, head).
 
 ### Step 5 - Deploy the application code (already done)
 
-The Stage 3 FIX code is already committed and pushed: `3f719d7 Implement email OTP signup verification` (`master` == `origin/master`). No further code step is required.
+The Stage 3 FIX code was committed and pushed as `3f719d7 Implement email OTP signup verification`. Later changes (immediate signup and the Forgot Password flow) are currently uncommitted, so they must be committed and deployed before Step 6's new-flow checks apply; the `fc35b4ffa9c0` portions of this historical runbook were already deployed.
 
-Vercel has no build hook for migrations, so `flask db upgrade` (step 4) must run as a manual release step. Because the code is already pushed and may already be deployed, production signup/login return 500 (`users.email` missing) until steps 3-4 are applied; the migration is the only remaining production action.
+Vercel has no build hook for migrations, so `flask db upgrade` (step 4) must run as a manual release step. If only the incremental `7c1a9e4b2f60` revision is being applied, run the same command against Neon after a fresh backup (no reset needed).
 
 ### Step 6 - Verify
 
-- `POST /signup` creates a pending challenge and sends a code (no `User` row yet).
-- `POST /signup/verify` with the correct code creates a verified user and redirects to `/login`.
-- `POST /login` succeeds with email + password and no OTP.
-- Neon shows tables `users`, `memories`, `email_verifications`, and `alembic_version` at `fc35b4ffa9c0`.
+- `POST /signup` creates an unverified `User` immediately, sends no email, and redirects to `/login`.
+- `POST /login` succeeds with email + password and no OTP, even when `email_verified` is false.
+- `POST /forgot_password` sends a reset code only when the account exists and returns the same message either way.
+- `POST /reset_password` with the correct code updates the password, invalidates existing sessions, and redirects to `/login`.
+- Neon shows tables `users`, `memories`, `email_verifications`, `password_resets`, and `alembic_version` at `7c1a9e4b2f60`.
 
 ### Migration chain validated on fresh PostgreSQL (not only SQLite)
 
@@ -545,11 +555,16 @@ On 2026-11-15 the full chain was run against a fresh, disposable PostgreSQL 16.4
 - `email_verifications`: 11 `NOT NULL` columns; unique `email_verifications_token_key`; `ix_email_verifications_email`.
 - A `pg_dump` -> `pg_restore` into a separate disposable database restored all rows and the revision `fc35b4ffa9c0`.
 
+Revision `7c1a9e4b2f60` was validated on a disposable SQLite database:
+`flask db upgrade` applied the full chain to head, `flask db check` reported no
+drift, and `downgrade fc35b4ffa9c0` followed by `upgrade` succeeded. It has not
+yet been run against PostgreSQL or Neon.
+
 ### Required production environment variables (Vercel)
 
 - `RESEND_API_KEY` - Resend API key.
 - `RESEND_FROM_EMAIL` - sender address on a verified domain (see below).
-- `RESEND_ENABLED=true` - must be exactly `true` (or `1`/`yes`) for delivery; otherwise the app silently skips sending and signup cannot be completed.
+- `RESEND_ENABLED=true` - must be exactly `true` (or `1`/`yes`) for delivery; otherwise the app silently skips sending and password-reset codes are not delivered.
 - `OTP_SECRET` - a dedicated random secret (for example `python -c "import secrets; print(secrets.token_urlsafe(48))"`). Falls back to `SECRET_KEY` when unset, but a dedicated value is required for production.
 - Existing: `SECRET_KEY`, `DATABASE_URL`, `RATELIMIT_STORAGE_URI`; `SESSION_COOKIE_SECURE` is automatic on Vercel.
 
@@ -557,7 +572,7 @@ On 2026-11-15 the full chain was run against a fresh, disposable PostgreSQL 16.4
 
 - `onboarding@resend.dev` is a shared testing sender that Resend only delivers to the account owner's own email address. It cannot send to arbitrary users.
 - Production requires a domain verified in Resend: add the domain, publish the required DNS records (SPF/DKIM, and DMARC as recommended), wait for verification, then set `RESEND_FROM_EMAIL` to an address on that verified domain (for example `no-reply@yourdomain.com`).
-- Until the domain is verified, `POST /signup` can create a pending challenge but the code will not be delivered to real users.
+- Until the domain is verified, `POST /forgot_password` will not deliver reset codes to real users.
 
 ## Useful Local Commands
 
